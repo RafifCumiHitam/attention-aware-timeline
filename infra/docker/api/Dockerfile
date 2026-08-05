@@ -3,7 +3,7 @@
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# Base
+# Base Stage
 # -----------------------------------------------------------------------------
 FROM python:3.12-slim AS base
 
@@ -21,7 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # -----------------------------------------------------------------------------
-# Development
+# Development Stage
 # -----------------------------------------------------------------------------
 FROM base AS development
 
@@ -35,7 +35,7 @@ EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
 
 # -----------------------------------------------------------------------------
-# Production builder
+# Production Builder Stage
 # -----------------------------------------------------------------------------
 FROM base AS builder
 
@@ -43,16 +43,16 @@ COPY apps/api/requirements.txt ./
 RUN pip install --prefix=/install -r requirements.txt
 
 # -----------------------------------------------------------------------------
-# Production
+# Production Runtime Stage
 # -----------------------------------------------------------------------------
 FROM base AS production
 
 COPY --from=builder /install /usr/local
-
 COPY apps/api/ .
 
 RUN adduser --disabled-password --gecos "" appuser && \
     chown -R appuser:appuser /app
+
 USER appuser
 
 EXPOSE 8000

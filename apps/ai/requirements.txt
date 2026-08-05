@@ -9,13 +9,11 @@ pydantic-settings==2.7.0
 python-dotenv==1.0.1
 orjson==3.10.12
 
-# Deep Learning & CV (loaded later — not used in mock stage)
-# torch==2.5.1
-# torchvision==0.20.1
-# opencv-python-headless==4.10.0.84
-# mediapipe==0.10.18
-# numpy==1.26.4
-# Pillow==11.0.0
+# Deep Learning & CV
+mediapipe==0.10.21
+opencv-python-headless==4.10.0.84
+numpy==1.26.4
+Pillow==11.0.0
 
 # HTTP
 httpx==0.28.1

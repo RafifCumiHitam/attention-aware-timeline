@@ -4,11 +4,11 @@
 
 services:
   # ---------------------------------------------------------------------------
-  # PostgreSQL
+  # PostgreSQL Database
   # ---------------------------------------------------------------------------
   postgres:
     image: postgres:16-alpine
-    container_name: aat-postgres
+    container_name: aat-postgres-dev
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-aat_user}
@@ -17,7 +17,7 @@ services:
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_dev_data:/var/lib/postgresql/data
       - ./infra/docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-aat_user} -d ${POSTGRES_DB:-attention_aware_timeline}"]
@@ -26,19 +26,19 @@ services:
       retries: 5
       start_period: 10s
     networks:
-      - aat-network
+      - aat-dev-network
 
   # ---------------------------------------------------------------------------
-  # Redis (caching, rate limiting, session store)
+  # Redis Cache & Session Store
   # ---------------------------------------------------------------------------
   redis:
     image: redis:7-alpine
-    container_name: aat-redis
+    container_name: aat-redis-dev
     restart: unless-stopped
     ports:
       - "${REDIS_PORT:-6379}:6379"
     volumes:
-      - redis_data:/data
+      - redis_dev_data:/data
     command: redis-server --appendonly yes
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -46,21 +46,23 @@ services:
       timeout: 5s
       retries: 5
     networks:
-      - aat-network
+      - aat-dev-network
 
   # ---------------------------------------------------------------------------
-  # Backend API (FastAPI)
+  # Backend API (FastAPI - Hot Reload Enabled)
   # ---------------------------------------------------------------------------
   api:
     build:
       context: .
       dockerfile: infra/docker/api/Dockerfile
       target: development
-    container_name: aat-api
+    container_name: aat-api-dev
     restart: unless-stopped
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
+      ENVIRONMENT: development
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-aat_user}:${POSTGRES_PASSWORD:-change_me_strong_password}@postgres:5432/${POSTGRES_DB:-attention_aware_timeline}
       DATABASE_URL_SYNC: postgresql://${POSTGRES_USER:-aat_user}:${POSTGRES_PASSWORD:-change_me_strong_password}@postgres:5432/${POSTGRES_DB:-attention_aware_timeline}
       REDIS_URL: redis://redis:6379/0
@@ -76,65 +78,61 @@ services:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     networks:
-      - aat-network
+      - aat-dev-network
 
   # ---------------------------------------------------------------------------
-  # AI Service
+  # AI Service (FastAPI + PyTorch - Hot Reload Enabled)
   # ---------------------------------------------------------------------------
   ai:
     build:
       context: .
       dockerfile: infra/docker/ai/Dockerfile
       target: development
-    container_name: aat-ai
+    container_name: aat-ai-dev
     restart: unless-stopped
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
+      ENVIRONMENT: development
       AI_DEVICE: ${AI_DEVICE:-cpu}
     ports:
       - "${AI_PORT:-8001}:8001"
     volumes:
       - ./apps/ai:/app
-      - ai_models:/app/models
+      - ai_dev_models:/app/models
       - /app/.venv
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8001/api/v1/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     networks:
-      - aat-network
-    # Uncomment for GPU support
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: 1
-    #           capabilities: [gpu]
+      - aat-dev-network
 
   # ---------------------------------------------------------------------------
-  # Frontend (Next.js)
+  # Frontend Web App (Next.js - Hot Reload Enabled)
   # ---------------------------------------------------------------------------
   web:
     build:
       context: .
       dockerfile: infra/docker/web/Dockerfile
       target: development
-    container_name: aat-web
+    container_name: aat-web-dev
     restart: unless-stopped
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       NEXT_PUBLIC_API_URL: http://localhost:8000/api/v1
       NEXT_PUBLIC_AI_SERVICE_URL: http://localhost:8001/api/v1
+      NEXT_PUBLIC_WS_URL: ws://localhost:8000/api/v1/ws/learning
     ports:
       - "3000:3000"
     volumes:
@@ -142,34 +140,50 @@ services:
       - /app/node_modules
       - /app/.next
     depends_on:
-      - api
-      - ai
+      api:
+        condition: service_healthy
+      ai:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     networks:
-      - aat-network
+      - aat-dev-network
 
   # ---------------------------------------------------------------------------
-  # Nginx (optional reverse proxy for production-like local setup)
+  # Nginx Reverse Proxy (Development)
   # ---------------------------------------------------------------------------
-  # nginx:
-  #   image: nginx:1.27-alpine
-  #   container_name: aat-nginx
-  #   ports:
-  #     - "80:80"
-  #     - "443:443"
-  #   volumes:
-  #     - ./infra/docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-  #   depends_on:
-  #     - web
-  #     - api
-  #     - ai
-  #   networks:
-  #     - aat-network
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: aat-nginx-dev
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./infra/docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      web:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+      ai:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - aat-dev-network
 
 volumes:
-  postgres_data:
-  redis_data:
-  ai_models:
+  postgres_dev_data:
+  redis_dev_data:
+  ai_dev_models:
 
 networks:
-  aat-network:
+  aat-dev-network:
     driver: bridge

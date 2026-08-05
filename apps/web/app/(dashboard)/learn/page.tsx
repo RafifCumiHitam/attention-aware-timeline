@@ -20,6 +20,7 @@ import { Separator } from "@/components/ui/separator";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { RealtimeLearningPanel } from "@/components/realtime/RealtimeLearningPanel";
 import {
   VideoPlayer,
   useEventLogger,
@@ -107,6 +108,8 @@ export default function LearnPage() {
               }}
             />
           </motion.div>
+
+          <RealtimeLearningPanel />
 
           <Card>
             <CardHeader>

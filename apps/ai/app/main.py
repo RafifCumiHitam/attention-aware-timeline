@@ -27,7 +27,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         mock_inference=settings.mock_inference,
         device=settings.device,
     )
-    # Future: load PyTorch / MediaPipe / TFLite weights here
+
+    # Load face analyser (no-op in mock mode)
+    if not settings.mock_inference:
+        from app.dependencies import get_face_analyzer  # noqa: PLC0415
+
+        analyzer = get_face_analyzer()
+        if analyzer is not None:
+            logger.info("face_analyzer_loaded", model_path=settings.model_path)
+        else:
+            logger.warning(
+                "face_analyzer_unavailable",
+                reason="model file missing or mediapipe not installed",
+            )
+
     yield
     logger.info("ai_shutdown")
 
