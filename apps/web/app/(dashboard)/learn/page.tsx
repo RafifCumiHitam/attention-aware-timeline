@@ -27,7 +27,7 @@ import {
   type EventSnapshot,
 } from "@/features/learn";
 import {
-  FaceTrackerOverlay,
+  FaceTrackerLazy,
   attentionScoreFromFace,
   type FaceLandmarkResult,
 } from "@/features/attention";
@@ -224,7 +224,7 @@ export default function LearnPage() {
               </CardDescription>
             </CardHeader>
             <CardContent>
-              <FaceTrackerOverlay
+              <FaceTrackerLazy
                 className="aspect-video w-full"
                 autoStart={false}
                 onResult={onFaceResult}
