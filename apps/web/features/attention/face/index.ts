@@ -7,6 +7,7 @@ export type {
 export { FaceLandmarkerEngine } from "./face-landmarker-engine";
 export { useFaceLandmarker } from "./hooks/use-face-landmarker";
 export { FaceTrackerOverlay } from "./components/face-tracker-overlay";
+export { FaceTrackerLazy } from "./components/face-tracker-lazy";
 export { attentionScoreFromFace } from "./attention-from-face";
 export { detectFace } from "./modules/face-detection";
 export { trackEyes } from "./modules/eye-tracking";

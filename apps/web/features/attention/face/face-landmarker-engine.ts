@@ -1,12 +1,10 @@
 /**
- * Browser MediaPipe Face Landmarker — optimized for ~30 FPS.
- * VIDEO mode, downscale, frame-skip when busy, GPU with CPU fallback.
+ * Browser MediaPipe Face Landmarker — ~30 FPS.
+ *
+ * IMPORTANT: Do NOT statically import `@mediapipe/tasks-vision`.
+ * Turbopack/Webpack fail on its internal dynamic import (`Can't resolve <dynamic>`).
+ * We load the ESM build from jsDelivr at runtime (client only).
  */
-import {
-  FaceLandmarker,
-  FilesetResolver,
-  type FaceLandmarkerResult as MpResult,
-} from "@mediapipe/tasks-vision";
 import { DEFAULT_MODEL_URL, DEFAULT_WASM_PATH } from "./constants";
 import { detectBlink } from "./modules/blink-detection";
 import { detectFace } from "./modules/face-detection";
@@ -17,6 +15,47 @@ import type {
   FaceLandmarkerOptions,
   LandmarkPoint,
 } from "./types";
+
+/** Minimal shapes we need from MediaPipe (avoid package types → no static link). */
+type MpFaceLandmarker = {
+  detectForVideo: (
+    input: HTMLVideoElement | HTMLCanvasElement,
+    timestampMs: number
+  ) => { faceLandmarks?: Array<Array<{ x: number; y: number; z: number }>> };
+  close: () => void;
+};
+
+type MpVisionModule = {
+  FilesetResolver: {
+    forVisionTasks: (wasmPath: string) => Promise<unknown>;
+  };
+  FaceLandmarker: {
+    createFromOptions: (
+      vision: unknown,
+      options: Record<string, unknown>
+    ) => Promise<MpFaceLandmarker>;
+  };
+};
+
+const MEDIAPIPE_ESM =
+  "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/+esm";
+
+let visionModulePromise: Promise<MpVisionModule> | null = null;
+
+function loadVisionModule(): Promise<MpVisionModule> {
+  if (typeof window === "undefined") {
+    return Promise.reject(new Error("FaceLandmarker only runs in the browser"));
+  }
+  if (!visionModulePromise) {
+    // Runtime URL import — keeps the package out of the Turbopack graph.
+    visionModulePromise = import(
+      /* webpackIgnore: true */
+      /* @vite-ignore */
+      MEDIAPIPE_ESM
+    ) as Promise<MpVisionModule>;
+  }
+  return visionModulePromise;
+}
 
 function emptyResult(timestamp: number): FaceLandmarkResult {
   return {
@@ -39,7 +78,7 @@ function toPoints(
 }
 
 export class FaceLandmarkerEngine {
-  private landmarker: FaceLandmarker | null = null;
+  private landmarker: MpFaceLandmarker | null = null;
   private opts: Required<
     Pick<
       FaceLandmarkerOptions,
@@ -79,6 +118,8 @@ export class FaceLandmarkerEngine {
   }
 
   async init(): Promise<void> {
+    const { FilesetResolver, FaceLandmarker } = await loadVisionModule();
+
     const create = async (delegate: "GPU" | "CPU") => {
       const vision = await FilesetResolver.forVisionTasks(this.opts.wasmPath);
       return FaceLandmarker.createFromOptions(vision, {
@@ -95,11 +136,13 @@ export class FaceLandmarkerEngine {
         minTrackingConfidence: this.opts.minTrackingConfidence,
       });
     };
+
     try {
       this.landmarker = await create("GPU");
     } catch {
       this.landmarker = await create("CPU");
     }
+
     this.canvas = document.createElement("canvas");
     this.ctx = this.canvas.getContext("2d", { willReadFrequently: false });
   }
@@ -173,7 +216,10 @@ export class FaceLandmarkerEngine {
     return this.canvas;
   }
 
-  private mapResult(mp: MpResult, t0: number): FaceLandmarkResult {
+  private mapResult(
+    mp: { faceLandmarks?: Array<Array<{ x: number; y: number; z: number }>> },
+    t0: number
+  ): FaceLandmarkResult {
     const timestamp = Date.now() / 1000;
     const latency = performance.now() - t0;
     this.fpsWindow.push(performance.now());
@@ -187,11 +233,13 @@ export class FaceLandmarkerEngine {
     }
     if (!mp.faceLandmarks?.length) {
       this.closedFrames = 0;
-      return { ...emptyResult(timestamp), latency_ms: Math.round(latency * 10) / 10, fps };
+      return {
+        ...emptyResult(timestamp),
+        latency_ms: Math.round(latency * 10) / 10,
+        fps,
+      };
     }
-    const landmarks = toPoints(
-      mp.faceLandmarks[0] as Array<{ x: number; y: number; z: number }>
-    );
+    const landmarks = toPoints(mp.faceLandmarks[0]);
     const detection = detectFace(landmarks);
     const eyes = trackEyes(landmarks);
     const pose = estimateHeadPose(landmarks);
