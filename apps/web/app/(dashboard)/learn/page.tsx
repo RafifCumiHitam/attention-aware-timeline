@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import {
   Eye,
@@ -26,6 +26,11 @@ import {
   useEventLogger,
   type EventSnapshot,
 } from "@/features/learn";
+import {
+  FaceTrackerOverlay,
+  attentionScoreFromFace,
+  type FaceLandmarkResult,
+} from "@/features/attention";
 
 const lessons = [
   { id: 1, title: "What is Attention?", duration: "8:24", completed: true },
@@ -51,16 +56,19 @@ const DEMO_SUBTITLES = [
 
 export default function LearnPage() {
   const [localLog, setLocalLog] = useState<EventSnapshot[]>([]);
-  const attentionScore = 82;
+  const [attentionScore, setAttentionScore] = useState(0.75);
+  const faceRef = useRef<FaceLandmarkResult | null>(null);
 
   const { onPlayerEvent, flush, status } = useEventLogger({
     debounceMs: 800,
     maxRetries: 5,
-    // Optional when backend session exists:
-    // sessionId: "...",
-    // videoId: "...",
     getAttentionScore: () => attentionScore,
   });
+
+  const onFaceResult = useCallback((r: FaceLandmarkResult) => {
+    faceRef.current = r;
+    setAttentionScore(attentionScoreFromFace(r));
+  }, []);
 
   return (
     <div>
@@ -81,10 +89,9 @@ export default function LearnPage() {
               title="Building Focus Metrics"
               poster="https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/images/BigBuckBunny.jpg"
               subtitles={DEMO_SUBTITLES}
-              attentionScore={attentionScore}
+              attentionScore={Math.round(attentionScore * 100)}
               seekStep={10}
               onEvent={(type, payload, meta) => {
-                // Local UI log
                 const snap = {
                   id: crypto.randomUUID?.() ?? String(Date.now()),
                   timestamp: new Date().toISOString(),
@@ -100,7 +107,6 @@ export default function LearnPage() {
                 if (type !== "TIME_UPDATE") {
                   setLocalLog((prev) => [snap, ...prev].slice(0, 25));
                 }
-                // Send to FastAPI via EventService (debounce + offline + retry)
                 onPlayerEvent(type, payload, meta);
               }}
               onVideoEnd={() => {
@@ -117,8 +123,8 @@ export default function LearnPage() {
                 <div>
                   <CardTitle>Building Focus Metrics</CardTitle>
                   <CardDescription className="mt-1">
-                    Learn how to compute real-time attention scores from gaze data
-                    and head pose estimation.
+                    Live attention from browser MediaPipe Face Landmarker feeds
+                    the player and event logger.
                   </CardDescription>
                 </div>
                 <Badge variant="secondary">Module 3</Badge>
@@ -130,13 +136,13 @@ export default function LearnPage() {
                   <Clock className="h-3.5 w-3.5" /> 15:45
                 </span>
                 <span className="flex items-center gap-1.5">
-                  <Eye className="h-3.5 w-3.5" /> Attention tracked
+                  <Eye className="h-3.5 w-3.5" /> Attention{" "}
+                  {Math.round(attentionScore * 100)}%
                 </span>
               </div>
             </CardContent>
           </Card>
 
-          {/* Event logger status + log */}
           <Card>
             <CardHeader className="pb-2">
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -182,7 +188,10 @@ export default function LearnPage() {
                 ) : (
                   <ul className="space-y-1.5 font-mono text-[11px]">
                     {localLog.map((e) => (
-                      <li key={e.id} className="flex flex-wrap gap-x-2 gap-y-0.5 border-b border-border/40 pb-1 last:border-0">
+                      <li
+                        key={e.id}
+                        className="flex flex-wrap gap-x-2 gap-y-0.5 border-b border-border/40 pb-1 last:border-0"
+                      >
                         <span className="text-muted-foreground">
                           {new Date(e.timestamp).toLocaleTimeString()}
                         </span>
@@ -200,13 +209,30 @@ export default function LearnPage() {
           </Card>
         </div>
 
-        {/* Playlist */}
         <motion.div
           initial={{ opacity: 0, x: 12 }}
           animate={{ opacity: 1, x: 0 }}
           transition={{ duration: 0.4, delay: 0.1 }}
+          className="space-y-4"
         >
-          <Card className="h-full">
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base">Attention Camera</CardTitle>
+              <CardDescription>
+                MediaPipe Face Landmarker in-browser (~30 FPS): gaze, eye open,
+                head pose, blink — no emotion model
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <FaceTrackerOverlay
+                className="aspect-video w-full"
+                autoStart={false}
+                onResult={onFaceResult}
+              />
+            </CardContent>
+          </Card>
+
+          <Card>
             <CardHeader>
               <CardTitle className="text-base">Course Playlist</CardTitle>
               <CardDescription>Attention-Aware Learning Fundamentals</CardDescription>
@@ -215,7 +241,7 @@ export default function LearnPage() {
             </CardHeader>
             <Separator />
             <CardContent className="p-0">
-              <ScrollArea className="h-[420px]">
+              <ScrollArea className="h-[320px]">
                 <div className="space-y-1 p-3">
                   {lessons.map((lesson) => (
                     <button
