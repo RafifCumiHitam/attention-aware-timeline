@@ -2,8 +2,9 @@
  * Browser MediaPipe Face Landmarker — ~30 FPS.
  *
  * IMPORTANT: Do NOT statically import `@mediapipe/tasks-vision`.
- * Turbopack/Webpack fail on its internal dynamic import (`Can't resolve <dynamic>`).
- * We load the ESM build from jsDelivr at runtime (client only).
+ * Turbopack fails on its internal dynamic import (`Can't resolve <dynamic>`).
+ * Load the ESM build from jsDelivr at runtime via Function() so the bundler
+ * cannot statically analyze the import specifier.
  */
 import { DEFAULT_MODEL_URL, DEFAULT_WASM_PATH } from "./constants";
 import { detectBlink } from "./modules/blink-detection";
@@ -16,7 +17,6 @@ import type {
   LandmarkPoint,
 } from "./types";
 
-/** Minimal shapes we need from MediaPipe (avoid package types → no static link). */
 type MpFaceLandmarker = {
   detectForVideo: (
     input: HTMLVideoElement | HTMLCanvasElement,
@@ -42,17 +42,22 @@ const MEDIAPIPE_ESM =
 
 let visionModulePromise: Promise<MpVisionModule> | null = null;
 
+/** Dynamic import hidden from Turbopack/Webpack static analysis. */
+function runtimeImport(specifier: string): Promise<MpVisionModule> {
+  // eslint-disable-next-line @typescript-eslint/no-implied-eval, no-new-func
+  const importer = new Function(
+    "s",
+    "return import(s)"
+  ) as (s: string) => Promise<MpVisionModule>;
+  return importer(specifier);
+}
+
 function loadVisionModule(): Promise<MpVisionModule> {
   if (typeof window === "undefined") {
     return Promise.reject(new Error("FaceLandmarker only runs in the browser"));
   }
   if (!visionModulePromise) {
-    // Runtime URL import — keeps the package out of the Turbopack graph.
-    visionModulePromise = import(
-      /* webpackIgnore: true */
-      /* @vite-ignore */
-      MEDIAPIPE_ESM
-    ) as Promise<MpVisionModule>;
+    visionModulePromise = runtimeImport(MEDIAPIPE_ESM);
   }
   return visionModulePromise;
 }
