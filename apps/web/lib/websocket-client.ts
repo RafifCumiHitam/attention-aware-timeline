@@ -5,9 +5,25 @@ export interface WebSocketClientOptions {
   sessionId?: string;
   userId?: string;
   token?: string | null;
-  pingIntervalMs?: number; // default 15000ms
-  pingTimeoutMs?: number; // default 5000ms
-  maxReconnectDelayMs?: number; // default 16000ms
+  pingIntervalMs?: number;
+  pingTimeoutMs?: number;
+  maxReconnectDelayMs?: number;
+}
+
+export interface TelemetryPayload {
+  videoId: string;
+  /** Video timeline position (seconds) — not wall-clock */
+  progressSeconds: number;
+  progressPercent: number;
+  attentionScore: number;
+  currentEmotion: string;
+  gazeX?: number | null;
+  gazeY?: number | null;
+  eventType?: string | null;
+  /** Wall-clock epoch ms */
+  wallClockMs?: number | null;
+  seekDeltaSeconds?: number | null;
+  isDifficultSection?: boolean;
 }
 
 export class WebSocketClient {
@@ -53,8 +69,15 @@ export class WebSocketClient {
     this.maxReconnectDelayMs = options.maxReconnectDelayMs || 16000;
   }
 
+  public getSessionId(): string {
+    return this.sessionId;
+  }
+
   public connect(): void {
-    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+    if (
+      this.ws &&
+      (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)
+    ) {
       return;
     }
 
@@ -69,7 +92,6 @@ export class WebSocketClient {
 
     try {
       this.ws = new WebSocket(this.url);
-
       this.ws.onopen = this.handleOpen.bind(this);
       this.ws.onmessage = this.handleMessage.bind(this);
       this.ws.onerror = this.handleError.bind(this);
@@ -81,11 +103,10 @@ export class WebSocketClient {
   }
 
   private handleOpen(): void {
-    console.log("[WebSocket] Connection established");
+    console.log("[WebSocket] Connection established", { sessionId: this.sessionId });
     const store = useRealtimeStore.getState();
     store.setConnectionStatus("connected");
     store.resetReconnectAttempts();
-
     this.startHeartbeat();
     this.flushOutboundQueue();
   }
@@ -111,7 +132,7 @@ export class WebSocketClient {
         case "realtime_state_sync":
           store.updateTelemetry({
             progressSeconds: data.progress_seconds,
-            progressPercent: (data.progress_seconds / 60) * 100, // normalized default
+            progressPercent: data.progress_percent ?? 0,
             attentionScore: data.attention_score,
             currentEmotion: data.current_emotion,
           });
@@ -123,7 +144,6 @@ export class WebSocketClient {
           break;
 
         case "telemetry_ack":
-          // Telemetry received and acknowledged by server
           break;
 
         default:
@@ -173,19 +193,16 @@ export class WebSocketClient {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
 
     this.pingSentTime = Date.now();
-    const pingPayload = JSON.stringify({
-      type: "ping",
-      timestamp: this.pingSentTime / 1000,
-    });
+    this.ws.send(
+      JSON.stringify({
+        type: "ping",
+        timestamp: this.pingSentTime / 1000,
+      })
+    );
 
-    this.ws.send(pingPayload);
-
-    // Expect pong within pingTimeoutMs
     this.pongTimeoutTimer = setTimeout(() => {
-      console.warn("[WebSocket] Heartbeat pong timeout. Force closing stale connection...");
-      if (this.ws) {
-        this.ws.close();
-      }
+      console.warn("[WebSocket] Heartbeat pong timeout. Force closing...");
+      if (this.ws) this.ws.close();
     }, this.pingTimeoutMs);
   }
 
@@ -205,13 +222,10 @@ export class WebSocketClient {
     store.incrementReconnectAttempts();
     const attempts = store.reconnectAttempts;
 
-    // Exponential backoff with jitter
     const delay = Math.min(
       this.maxReconnectDelayMs,
       Math.pow(2, attempts - 1) * 1000 + Math.random() * 500
     );
-
-    console.log(`[WebSocket] Scheduling reconnect in ${Math.round(delay)}ms (Attempt #${attempts})`);
 
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
@@ -219,16 +233,7 @@ export class WebSocketClient {
     }, delay);
   }
 
-  public sendTelemetry(payload: {
-    videoId: string;
-    progressSeconds: number;
-    progressPercent: number;
-    attentionScore: number;
-    currentEmotion: string;
-    gazeX?: number | null;
-    gazeY?: number | null;
-  }): void {
-    // Update local Zustand store immediately for snappy UI responsiveness
+  public sendTelemetry(payload: TelemetryPayload): void {
     useRealtimeStore.getState().updateTelemetry({
       progressSeconds: payload.progressSeconds,
       progressPercent: payload.progressPercent,
@@ -248,15 +253,16 @@ export class WebSocketClient {
       current_emotion: payload.currentEmotion,
       gaze_x: payload.gazeX ?? null,
       gaze_y: payload.gazeY ?? null,
+      event_type: payload.eventType ?? null,
+      wall_clock_ms: payload.wallClockMs ?? Date.now(),
+      seek_delta_seconds: payload.seekDeltaSeconds ?? null,
+      is_difficult_section: payload.isDifficultSection ?? false,
     });
 
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(msg);
     } else {
-      // Queue offline message (up to max 50 items)
-      if (this.outboundQueue.length >= 50) {
-        this.outboundQueue.shift();
-      }
+      if (this.outboundQueue.length >= 50) this.outboundQueue.shift();
       this.outboundQueue.push(msg);
     }
   }
@@ -265,9 +271,7 @@ export class WebSocketClient {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     while (this.outboundQueue.length > 0) {
       const msg = this.outboundQueue.shift();
-      if (msg) {
-        this.ws.send(msg);
-      }
+      if (msg) this.ws.send(msg);
     }
   }
 

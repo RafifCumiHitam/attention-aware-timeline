@@ -1,7 +1,7 @@
 import { useEffect, useRef, useCallback } from "react";
 import { useAuthStore } from "@/stores/auth-store";
 import { useRealtimeStore } from "@/stores/realtime-store";
-import { WebSocketClient, WebSocketClientOptions } from "@/lib/websocket-client";
+import { WebSocketClient, type TelemetryPayload } from "@/lib/websocket-client";
 
 export interface UseRealtimeWebsocketOptions {
   sessionId?: string;
@@ -10,13 +10,16 @@ export interface UseRealtimeWebsocketOptions {
 }
 
 export function useRealtimeWebsocket(options: UseRealtimeWebsocketOptions = {}) {
-  const { sessionId = "demo-session-1", videoId = "demo-video-1", autoConnect = true } = options;
+  const {
+    sessionId = "demo-session-1",
+    videoId = "demo-video-1",
+    autoConnect = true,
+  } = options;
   const token = useAuthStore((state) => state.accessToken);
   const user = useAuthStore((state) => state.user);
 
   const clientRef = useRef<WebSocketClient | null>(null);
 
-  // Subscribe to Zustand store values for quick component access
   const connectionStatus = useRealtimeStore((state) => state.connectionStatus);
   const lastPingMs = useRealtimeStore((state) => state.lastPingMs);
   const progressSeconds = useRealtimeStore((state) => state.progressSeconds);
@@ -31,13 +34,11 @@ export function useRealtimeWebsocket(options: UseRealtimeWebsocketOptions = {}) 
   useEffect(() => {
     if (!autoConnect) return;
 
-    const wsOptions: WebSocketClientOptions = {
+    const client = new WebSocketClient({
       sessionId,
       userId: user?.id || "demo-user-1",
       token,
-    };
-
-    const client = new WebSocketClient(wsOptions);
+    });
     clientRef.current = client;
     client.connect();
 
@@ -48,18 +49,20 @@ export function useRealtimeWebsocket(options: UseRealtimeWebsocketOptions = {}) 
   }, [sessionId, token, user?.id, autoConnect]);
 
   const sendTelemetry = useCallback(
-    (telemetry: {
-      progressSeconds: number;
-      progressPercent: number;
-      attentionScore: number;
-      currentEmotion: string;
-      gazeX?: number | null;
-      gazeY?: number | null;
-    }) => {
+    (telemetry: Omit<TelemetryPayload, "videoId"> & { videoId?: string }) => {
       if (clientRef.current) {
         clientRef.current.sendTelemetry({
-          videoId,
-          ...telemetry,
+          videoId: telemetry.videoId ?? videoId,
+          progressSeconds: telemetry.progressSeconds,
+          progressPercent: telemetry.progressPercent,
+          attentionScore: telemetry.attentionScore,
+          currentEmotion: telemetry.currentEmotion,
+          gazeX: telemetry.gazeX,
+          gazeY: telemetry.gazeY,
+          eventType: telemetry.eventType,
+          wallClockMs: telemetry.wallClockMs,
+          seekDeltaSeconds: telemetry.seekDeltaSeconds,
+          isDifficultSection: telemetry.isDifficultSection,
         });
       }
     },
@@ -67,18 +70,16 @@ export function useRealtimeWebsocket(options: UseRealtimeWebsocketOptions = {}) 
   );
 
   const connect = useCallback(() => {
-    if (clientRef.current) {
-      clientRef.current.connect();
-    }
+    clientRef.current?.connect();
   }, []);
 
   const disconnect = useCallback(() => {
-    if (clientRef.current) {
-      clientRef.current.disconnect();
-    }
+    clientRef.current?.disconnect();
   }, []);
 
   return {
+    sessionId,
+    videoId,
     connectionStatus,
     lastPingMs,
     progressSeconds,
