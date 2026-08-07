@@ -12,7 +12,6 @@ export interface WebSocketClientOptions {
 
 export interface TelemetryPayload {
   videoId: string;
-  /** Video timeline position (seconds) — not wall-clock */
   progressSeconds: number;
   progressPercent: number;
   attentionScore: number;
@@ -20,10 +19,18 @@ export interface TelemetryPayload {
   gazeX?: number | null;
   gazeY?: number | null;
   eventType?: string | null;
-  /** Wall-clock epoch ms */
   wallClockMs?: number | null;
   seekDeltaSeconds?: number | null;
   isDifficultSection?: boolean;
+}
+
+/** Defer Zustand writes so we never setState while React is rendering. */
+function scheduleStoreUpdate(fn: () => void): void {
+  if (typeof queueMicrotask === "function") {
+    queueMicrotask(fn);
+  } else {
+    setTimeout(fn, 0);
+  }
 }
 
 export class WebSocketClient {
@@ -97,13 +104,13 @@ export class WebSocketClient {
       this.ws.onerror = this.handleError.bind(this);
       this.ws.onclose = this.handleClose.bind(this);
     } catch (error) {
-      console.error("[WebSocket] Failed to instantiate WebSocket:", error);
+      console.warn("[WebSocket] Failed to instantiate:", error);
       this.scheduleReconnect();
     }
   }
 
   private handleOpen(): void {
-    console.log("[WebSocket] Connection established", { sessionId: this.sessionId });
+    console.log("[WebSocket] Connected", { sessionId: this.sessionId, url: this.url });
     const store = useRealtimeStore.getState();
     store.setConnectionStatus("connected");
     store.resetReconnectAttempts();
@@ -122,24 +129,29 @@ export class WebSocketClient {
           break;
 
         case "adaptive_playback_command":
-          store.setAdaptiveCommand({
-            playbackRate: data.playback_rate,
-            action: data.action,
-            reason: data.reason,
+          scheduleStoreUpdate(() => {
+            useRealtimeStore.getState().setAdaptiveCommand({
+              playbackRate: data.playback_rate,
+              action: data.action,
+              reason: data.reason,
+            });
           });
           break;
 
         case "realtime_state_sync":
-          store.updateTelemetry({
-            progressSeconds: data.progress_seconds,
-            progressPercent: data.progress_percent ?? 0,
-            attentionScore: data.attention_score,
-            currentEmotion: data.current_emotion,
-          });
-          store.setAdaptiveCommand({
-            playbackRate: data.playback_rate,
-            action: "maintain",
-            reason: "Synced from session broadcast",
+          scheduleStoreUpdate(() => {
+            const s = useRealtimeStore.getState();
+            s.updateTelemetry({
+              progressSeconds: data.progress_seconds,
+              progressPercent: data.progress_percent ?? 0,
+              attentionScore: data.attention_score,
+              currentEmotion: data.current_emotion,
+            });
+            s.setAdaptiveCommand({
+              playbackRate: data.playback_rate,
+              action: "maintain",
+              reason: "Synced from session broadcast",
+            });
           });
           break;
 
@@ -147,20 +159,29 @@ export class WebSocketClient {
           break;
 
         default:
-          console.debug("[WebSocket] Received message:", data);
+          console.debug("[WebSocket] message:", data);
       }
     } catch (err) {
-      console.error("[WebSocket] Error parsing message:", err);
+      console.warn("[WebSocket] parse error:", err);
     }
   }
 
-  private handleError(event: Event): void {
-    console.error("[WebSocket] Error encountered:", event);
-    useRealtimeStore.getState().setConnectionStatus("error");
+  /**
+   * Browser fires `error` with an empty Event before `close` when the server
+   * is unreachable. Do not treat as terminal — let onclose drive reconnect.
+   */
+  private handleError(_event: Event): void {
+    console.warn(
+      "[WebSocket] Transport error (API may be offline). URL:",
+      this.url,
+      "— ensure FastAPI is running on :8000"
+    );
+    // Intentionally do NOT set connectionStatus to "error" here.
+    // onclose will set "reconnecting" and scheduleReconnect.
   }
 
   private handleClose(event: CloseEvent): void {
-    console.warn(`[WebSocket] Closed (code: ${event.code}, reason: ${event.reason})`);
+    console.warn(`[WebSocket] Closed (code: ${event.code})`);
     this.stopHeartbeat();
 
     if (!this.isIntentionallyClosed) {
@@ -173,9 +194,7 @@ export class WebSocketClient {
 
   private startHeartbeat(): void {
     this.stopHeartbeat();
-    this.pingTimer = setInterval(() => {
-      this.sendPing();
-    }, this.pingIntervalMs);
+    this.pingTimer = setInterval(() => this.sendPing(), this.pingIntervalMs);
   }
 
   private stopHeartbeat(): void {
@@ -201,8 +220,8 @@ export class WebSocketClient {
     );
 
     this.pongTimeoutTimer = setTimeout(() => {
-      console.warn("[WebSocket] Heartbeat pong timeout. Force closing...");
-      if (this.ws) this.ws.close();
+      console.warn("[WebSocket] Pong timeout — closing stale socket");
+      this.ws?.close();
     }, this.pingTimeoutMs);
   }
 
@@ -212,7 +231,9 @@ export class WebSocketClient {
       this.pongTimeoutTimer = null;
     }
     const latency = Date.now() - this.pingSentTime;
-    useRealtimeStore.getState().setPingLatency(latency);
+    scheduleStoreUpdate(() => {
+      useRealtimeStore.getState().setPingLatency(latency);
+    });
   }
 
   private scheduleReconnect(): void {
@@ -234,13 +255,16 @@ export class WebSocketClient {
   }
 
   public sendTelemetry(payload: TelemetryPayload): void {
-    useRealtimeStore.getState().updateTelemetry({
-      progressSeconds: payload.progressSeconds,
-      progressPercent: payload.progressPercent,
-      attentionScore: payload.attentionScore,
-      currentEmotion: payload.currentEmotion,
-      gazeX: payload.gazeX,
-      gazeY: payload.gazeY,
+    // Optimistic UI update — deferred to avoid "setState while rendering"
+    scheduleStoreUpdate(() => {
+      useRealtimeStore.getState().updateTelemetry({
+        progressSeconds: payload.progressSeconds,
+        progressPercent: payload.progressPercent,
+        attentionScore: payload.attentionScore,
+        currentEmotion: payload.currentEmotion,
+        gazeX: payload.gazeX,
+        gazeY: payload.gazeY,
+      });
     });
 
     const msg = JSON.stringify({

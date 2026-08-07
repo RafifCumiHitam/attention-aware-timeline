@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   Activity,
   Zap,
@@ -16,7 +16,6 @@ import {
 import { useRealtimeWebsocket } from "@/hooks/use-realtime-websocket";
 
 export interface RealtimeLearningPanelProps {
-  /** Must match Learn page pipeline session when co-mounted */
   sessionId?: string;
   videoId?: string;
   /** When false, only displays store state (pipeline owns the socket) */
@@ -52,22 +51,33 @@ export function RealtimeLearningPanel({
   const [simEmotion, setSimEmotion] = useState("focused");
   const [simProgress, setSimProgress] = useState(15.0);
 
+  // Refs so the interval never closes over stale values / never calls setState-in-updater side effects
+  const simAttentionRef = useRef(simAttention);
+  const simEmotionRef = useRef(simEmotion);
+  const playbackRateRef = useRef(playbackRate);
+  simAttentionRef.current = simAttention;
+  simEmotionRef.current = simEmotion;
+  playbackRateRef.current = playbackRate;
+
   useEffect(() => {
     if (!simulating || !autoConnect) return;
 
     const interval = setInterval(() => {
       setSimProgress((prevProgress) => {
-        const nextProgress = prevProgress + 1.0 * playbackRate;
+        const nextProgress = prevProgress + 1.0 * playbackRateRef.current;
         const normalizedPercent = Math.min(100, (nextProgress / 120) * 100);
 
-        sendTelemetry({
-          progressSeconds: Math.round(nextProgress * 10) / 10,
-          progressPercent: Math.round(normalizedPercent * 10) / 10,
-          attentionScore: simAttention,
-          currentEmotion: simEmotion,
-          eventType: "SIM_TICK",
-          wallClockMs: Date.now(),
-          isDifficultSection: normalizedPercent >= 40 && normalizedPercent <= 80,
+        // Side effects OUTSIDE the pure updater — schedule after commit
+        queueMicrotask(() => {
+          sendTelemetry({
+            progressSeconds: Math.round(nextProgress * 10) / 10,
+            progressPercent: Math.round(normalizedPercent * 10) / 10,
+            attentionScore: simAttentionRef.current,
+            currentEmotion: simEmotionRef.current,
+            eventType: "SIM_TICK",
+            wallClockMs: Date.now(),
+            isDifficultSection: normalizedPercent >= 40 && normalizedPercent <= 80,
+          });
         });
 
         return nextProgress;
@@ -75,7 +85,7 @@ export function RealtimeLearningPanel({
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [simulating, playbackRate, simAttention, simEmotion, sendTelemetry, autoConnect]);
+  }, [simulating, autoConnect, sendTelemetry]);
 
   const handleEmotionChange = (newEmotion: string) => {
     setSimEmotion(newEmotion);
