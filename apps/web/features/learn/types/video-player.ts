@@ -34,30 +34,25 @@ export type VideoPlayerEventHandler<T extends VideoPlayerEventType = VideoPlayer
 ) => void;
 
 export interface VideoPlayerEventMeta {
+  /** Wall-clock epoch ms when the event was emitted */
   timestamp: number;
   videoSrc: string;
   playbackRate: number;
   /** Buffered percentage 0–100 */
   buffer: number;
-  /** Fullscreen state at event time */
   fullscreen: boolean;
   volume: number;
   muted: boolean;
+  /** Video timeline position in seconds */
   currentTime: number;
 }
 
 export interface SubtitleTrack {
-  /** Unique id */
   id: string;
-  /** Display label e.g. "English" */
   label: string;
-  /** BCP 47 language code */
   srclang: string;
-  /** URL to .vtt file */
   src: string;
-  /** Default selected */
   default?: boolean;
-  /** kind attribute */
   kind?: "subtitles" | "captions" | "descriptions" | "chapters";
 }
 
@@ -68,35 +63,25 @@ export interface VideoPlayerSource {
 }
 
 export interface VideoPlayerProps {
-  /** Primary video URL (or multiple sources) */
   src: string | VideoPlayerSource[];
-  /** Poster image */
   poster?: string;
-  /** Video title shown in UI */
   title?: string;
-  /** Subtitle / caption tracks */
   subtitles?: SubtitleTrack[];
-  /** Start time in seconds */
   startTime?: number;
-  /** Auto play (may be blocked by browser) */
   autoPlay?: boolean;
-  /** Loop playback */
   loop?: boolean;
-  /** Initial volume 0–1 */
   defaultVolume?: number;
-  /** Initial playback rate */
   defaultPlaybackRate?: number;
-  /** Seek step for keyboard / buttons (seconds) */
+  /**
+   * When set, the player applies this rate from the adaptive engine.
+   * Distinct from user manual speed changes.
+   */
+  externalPlaybackRate?: number | null;
   seekStep?: number;
-  /** Available speed options */
   playbackRates?: number[];
-  /** Show attention overlay badge */
   attentionScore?: number | null;
-  /** CSS class for outer container */
   className?: string;
-  /** Unified event callback — fired for every logged action */
   onEvent?: VideoPlayerEventHandler;
-  /** Individual callbacks (optional convenience) */
   onPlay?: (payload: VideoPlayerEventPayload["PLAY"]) => void;
   onPause?: (payload: VideoPlayerEventPayload["PAUSE"]) => void;
   onSeekForward?: (payload: VideoPlayerEventPayload["SEEK_FORWARD"]) => void;

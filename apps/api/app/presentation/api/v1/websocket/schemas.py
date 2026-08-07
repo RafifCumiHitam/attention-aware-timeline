@@ -13,16 +13,37 @@ class PingMessage(BaseModel):
 
 
 class TelemetryUpdateMessage(BaseModel):
-    """Realtime telemetry sample sent by frontend video player."""
+    """Realtime telemetry sample sent by frontend (player + face pipeline)."""
     type: Literal["telemetry_update"] = "telemetry_update"
-    session_id: str = Field(description="Active learning session ID")
+    session_id: str = Field(description="Active learning session ID (shared across face, events, WS)")
     video_id: str = Field(description="Video ID being played")
-    progress_seconds: float = Field(ge=0.0, description="Current video playback position in seconds")
+    # Video timeline position (seconds into the media) — NOT wall-clock
+    progress_seconds: float = Field(ge=0.0, description="Current video playback position (video time)")
     progress_percent: float = Field(ge=0.0, le=100.0, description="Playback completion percentage")
-    attention_score: float = Field(ge=0.0, le=1.0, description="Realtime calculated attention score")
-    current_emotion: str = Field(default="neutral", description="Detected emotion e.g. focused, confused, bored, distracted, neutral")
-    gaze_x: float | None = Field(default=None, description="Normalized gaze coordinate X (0-1)")
-    gaze_y: float | None = Field(default=None, description="Normalized gaze coordinate Y (0-1)")
+    attention_score: float = Field(ge=0.0, le=1.0, description="Realtime attention score from face heuristics")
+    current_emotion: str = Field(
+        default="neutral",
+        description="Emotion label (heuristic placeholder until DL model is wired)",
+    )
+    gaze_x: float | None = Field(default=None, description="Normalized gaze X (0-1)")
+    gaze_y: float | None = Field(default=None, description="Normalized gaze Y (0-1)")
+    # Optional pipeline context
+    event_type: str | None = Field(
+        default=None,
+        description="Player event that triggered this sample e.g. TIME_UPDATE, SEEK_FORWARD",
+    )
+    wall_clock_ms: float | None = Field(
+        default=None,
+        description="Client wall-clock epoch ms (distinct from progress_seconds video time)",
+    )
+    seek_delta_seconds: float | None = Field(
+        default=None,
+        description="Seek delta in video-seconds when event_type is SEEK_FORWARD/BACKWARD",
+    )
+    is_difficult_section: bool = Field(
+        default=False,
+        description="True when current video position is tagged as difficult content",
+    )
 
 
 class AdaptationRequestMessage(BaseModel):
@@ -32,6 +53,8 @@ class AdaptationRequestMessage(BaseModel):
     current_speed: float = Field(default=1.0, gt=0.0)
     attention_score: float = Field(ge=0.0, le=1.0)
     current_emotion: str = Field(default="neutral")
+    is_difficult_section: bool = Field(default=False)
+    event_type: str | None = Field(default=None)
 
 
 # --- Server -> Client Response Schemas ---
@@ -53,10 +76,12 @@ class AdaptivePlaybackCommandMessage(BaseModel):
     """Adaptive playback speed command returned by backend adaptive engine."""
     type: Literal["adaptive_playback_command"] = "adaptive_playback_command"
     session_id: str
-    playback_rate: float = Field(description="Recommended video playback rate e.g. 0.75, 1.0, 1.25")
+    playback_rate: float = Field(description="Recommended video playback rate e.g. 0.8, 1.0, 1.25")
     action: Literal["slowdown", "speedup", "pause_prompt", "recap_suggestion", "maintain"] = "maintain"
     reason: str = Field(description="Human-readable reason for adaptation")
-    target_timestamp: float | None = Field(default=None, description="Video timestamp where adaptation occurred")
+    target_timestamp: float | None = Field(
+        default=None, description="Video timestamp (video time) where adaptation applied"
+    )
 
 
 class RealtimeStateSyncMessage(BaseModel):
