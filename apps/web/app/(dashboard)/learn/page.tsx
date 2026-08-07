@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useState } from "react";
 import { motion } from "framer-motion";
 import {
   Eye,
@@ -11,6 +11,7 @@ import {
   Wifi,
   WifiOff,
   Upload,
+  Gauge,
 } from "lucide-react";
 import { PageHeader } from "@/components/shared/page-header";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -24,13 +25,10 @@ import { RealtimeLearningPanel } from "@/components/realtime/RealtimeLearningPan
 import {
   VideoPlayer,
   useEventLogger,
+  useAttentionPipeline,
   type EventSnapshot,
 } from "@/features/learn";
-import {
-  FaceTrackerLazy,
-  attentionScoreFromFace,
-  type FaceLandmarkResult,
-} from "@/features/attention";
+import { FaceTrackerLazy } from "@/features/attention";
 
 const lessons = [
   { id: 1, title: "What is Attention?", duration: "8:24", completed: true },
@@ -54,21 +52,53 @@ const DEMO_SUBTITLES = [
   },
 ];
 
+const DEMO_VIDEO_ID = "vid-building-focus-metrics";
+
 export default function LearnPage() {
   const [localLog, setLocalLog] = useState<EventSnapshot[]>([]);
-  const [attentionScore, setAttentionScore] = useState(0.75);
-  const faceRef = useRef<FaceLandmarkResult | null>(null);
+
+  const pipeline = useAttentionPipeline({
+    videoId: DEMO_VIDEO_ID,
+    telemetryIntervalMs: 1000,
+    autoConnect: true,
+  });
 
   const { onPlayerEvent, flush, status } = useEventLogger({
     debounceMs: 800,
     maxRetries: 5,
-    getAttentionScore: () => attentionScore,
+    getAttentionScore: () => pipeline.attentionScore,
   });
 
-  const onFaceResult = useCallback((r: FaceLandmarkResult) => {
-    faceRef.current = r;
-    setAttentionScore(attentionScoreFromFace(r));
-  }, []);
+  const handlePlayerEvent = useCallback(
+    (
+      type: Parameters<typeof pipeline.onPlayerEvent>[0],
+      payload: Parameters<typeof pipeline.onPlayerEvent>[1],
+      meta: Parameters<typeof pipeline.onPlayerEvent>[2]
+    ) => {
+      // Core pipeline: face + player → session-bound WS telemetry
+      pipeline.onPlayerEvent(type, payload, meta);
+
+      // REST event logger (batch to FastAPI)
+      onPlayerEvent(type, payload, meta);
+
+      if (type !== "TIME_UPDATE") {
+        const snap: EventSnapshot = {
+          id: crypto.randomUUID?.() ?? String(Date.now()),
+          timestamp: new Date().toISOString(),
+          eventType: type as EventSnapshot["eventType"],
+          currentTime: meta.currentTime,
+          playbackSpeed: meta.playbackRate,
+          buffer: meta.buffer,
+          fullscreen: meta.fullscreen,
+          volume: meta.volume,
+          muted: meta.muted,
+          videoSrc: meta.videoSrc,
+        };
+        setLocalLog((prev) => [snap, ...prev].slice(0, 25));
+      }
+    },
+    [pipeline, onPlayerEvent]
+  );
 
   return (
     <div>
@@ -76,6 +106,21 @@ export default function LearnPage() {
         title="Video Learning"
         description="Attention-aware adaptive video lessons"
       />
+
+      <div className="mb-4 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+        <Badge variant="outline" className="font-mono">
+          session: {pipeline.sessionId.slice(0, 8)}…
+        </Badge>
+        <Badge variant={pipeline.connectionStatus === "connected" ? "default" : "secondary"}>
+          WS {pipeline.connectionStatus}
+        </Badge>
+        {pipeline.adaptiveReason && (
+          <Badge variant="secondary" className="max-w-md truncate gap-1">
+            <Gauge className="h-3 w-3" />
+            {pipeline.adaptivePlaybackRate}x · {pipeline.adaptiveAction}
+          </Badge>
+        )}
+      </div>
 
       <div className="grid gap-6 lg:grid-cols-3">
         <div className="space-y-4 lg:col-span-2">
@@ -89,33 +134,21 @@ export default function LearnPage() {
               title="Building Focus Metrics"
               poster="https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/images/BigBuckBunny.jpg"
               subtitles={DEMO_SUBTITLES}
-              attentionScore={Math.round(attentionScore * 100)}
+              attentionScore={Math.round(pipeline.attentionScore * 100)}
+              externalPlaybackRate={pipeline.adaptivePlaybackRate}
               seekStep={10}
-              onEvent={(type, payload, meta) => {
-                const snap = {
-                  id: crypto.randomUUID?.() ?? String(Date.now()),
-                  timestamp: new Date().toISOString(),
-                  eventType: type as EventSnapshot["eventType"],
-                  currentTime: meta.currentTime,
-                  playbackSpeed: meta.playbackRate,
-                  buffer: meta.buffer,
-                  fullscreen: meta.fullscreen,
-                  volume: meta.volume,
-                  muted: meta.muted,
-                  videoSrc: meta.videoSrc,
-                };
-                if (type !== "TIME_UPDATE") {
-                  setLocalLog((prev) => [snap, ...prev].slice(0, 25));
-                }
-                onPlayerEvent(type, payload, meta);
-              }}
+              onEvent={handlePlayerEvent}
               onVideoEnd={() => {
                 void flush();
               }}
             />
           </motion.div>
 
-          <RealtimeLearningPanel />
+          <RealtimeLearningPanel
+            sessionId={pipeline.sessionId}
+            videoId={DEMO_VIDEO_ID}
+            autoConnect={false}
+          />
 
           <Card>
             <CardHeader>
@@ -123,8 +156,9 @@ export default function LearnPage() {
                 <div>
                   <CardTitle>Building Focus Metrics</CardTitle>
                   <CardDescription className="mt-1">
-                    Live attention from browser MediaPipe Face Landmarker feeds
-                    the player and event logger.
+                    Core pipeline: Face Landmarker → attention score → session telemetry →
+                    WebSocket adaptive engine → playback rate. Seek-forward into a difficult
+                    section (40–80%) with low attention slows to 0.8x.
                   </CardDescription>
                 </div>
                 <Badge variant="secondary">Module 3</Badge>
@@ -137,9 +171,17 @@ export default function LearnPage() {
                 </span>
                 <span className="flex items-center gap-1.5">
                   <Eye className="h-3.5 w-3.5" /> Attention{" "}
-                  {Math.round(attentionScore * 100)}%
+                  {Math.round(pipeline.attentionScore * 100)}%
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <Gauge className="h-3.5 w-3.5" /> Rate {pipeline.adaptivePlaybackRate}x
                 </span>
               </div>
+              {pipeline.adaptiveReason && (
+                <p className="mt-3 text-xs text-amber-600 dark:text-amber-400">
+                  {pipeline.adaptiveReason}
+                </p>
+              )}
             </CardContent>
           </Card>
 
@@ -149,7 +191,7 @@ export default function LearnPage() {
                 <div>
                   <CardTitle className="text-base">Event Logger</CardTitle>
                   <CardDescription>
-                    timestamp · currentTime · playbackSpeed · buffer · fullscreen → FastAPI
+                    wall-clock ISO · video currentTime · playbackSpeed → FastAPI batch
                   </CardDescription>
                 </div>
                 <div className="flex items-center gap-2">
@@ -219,15 +261,15 @@ export default function LearnPage() {
             <CardHeader className="pb-2">
               <CardTitle className="text-base">Attention Camera</CardTitle>
               <CardDescription>
-                MediaPipe Face Landmarker in-browser (~30 FPS): gaze, eye open,
-                head pose, blink — no emotion model
+                MediaPipe Face Landmarker (~30 FPS). Scores feed the same session as the
+                WebSocket adaptive engine.
               </CardDescription>
             </CardHeader>
             <CardContent>
               <FaceTrackerLazy
                 className="aspect-video w-full"
                 autoStart={false}
-                onResult={onFaceResult}
+                onResult={pipeline.onFaceResult}
               />
             </CardContent>
           </Card>
