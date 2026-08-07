@@ -13,7 +13,11 @@ from app.presentation.api.schemas.auth import (
 )
 from app.presentation.api.schemas.user import UserCreate, UserPublic, UserResponse, UserUpdate
 from app.presentation.api.schemas.video import VideoCreate, VideoListItem, VideoResponse, VideoUpdate
-from app.presentation.api.schemas.session import SessionCreate, SessionResponse, SessionUpdate, SessionWithVideo
+from app.presentation.api.schemas.session import (
+    SessionCreate,
+    SessionResponse,
+    SessionUpdate,
+)
 from app.presentation.api.schemas.event import EventBatchCreate, EventCreate, EventResponse
 from app.presentation.api.schemas.analytics import AnalyticsOverviewResponse, OverviewStats
 
@@ -38,7 +42,6 @@ __all__ = [
     "SessionCreate",
     "SessionResponse",
     "SessionUpdate",
-    "SessionWithVideo",
     "EventBatchCreate",
     "EventCreate",
     "EventResponse",
