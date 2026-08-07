@@ -8,14 +8,17 @@ const apiClient = axios.create({
   timeout: 30000,
 });
 
+/** Read access JWT from Zustand persist (aat-auth). */
 function getAccessToken(): string | null {
   if (typeof window === "undefined") return null;
   try {
-    // Zustand persist default key
     const raw = localStorage.getItem("aat-auth");
     if (!raw) return null;
     const parsed = JSON.parse(raw) as { state?: { accessToken?: string | null } };
-    return parsed?.state?.accessToken ?? null;
+    const token = parsed?.state?.accessToken ?? null;
+    // Never send the old demo placeholder
+    if (!token || token === "demo-access-token") return null;
+    return token;
   } catch {
     return null;
   }
@@ -24,7 +27,7 @@ function getAccessToken(): string | null {
 apiClient.interceptors.request.use(
   (config: InternalAxiosRequestConfig) => {
     const token = getAccessToken();
-    if (token && token !== "demo-access-token") {
+    if (token) {
       config.headers.Authorization = `Bearer ${token}`;
     }
     return config;
@@ -35,7 +38,6 @@ apiClient.interceptors.request.use(
 apiClient.interceptors.response.use(
   (response) => response,
   async (error: AxiosError) => {
-    // Surface structured error for services
     return Promise.reject(error);
   }
 );
