@@ -5,6 +5,7 @@ export {
   useAttentionPipeline,
   isDifficultSection,
 } from "./hooks/use-attention-pipeline";
+export { useSessionLifecycle } from "./hooks/use-session-lifecycle";
 export {
   EventService,
   getEventService,

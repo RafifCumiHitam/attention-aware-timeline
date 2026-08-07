@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import {
   Eye,
@@ -26,6 +26,8 @@ import {
   VideoPlayer,
   useEventLogger,
   useAttentionPipeline,
+  useSessionLifecycle,
+  getEventService,
   type EventSnapshot,
 } from "@/features/learn";
 import { FaceTrackerLazy } from "@/features/attention";
@@ -52,12 +54,19 @@ const DEMO_SUBTITLES = [
   },
 ];
 
-const DEMO_VIDEO_ID = "vid-building-focus-metrics";
+/** Stable demo video UUID placeholder — replace with real catalog id when auth+DB seeded */
+const DEMO_VIDEO_ID = "00000000-0000-4000-8000-000000000101";
 
 export default function LearnPage() {
   const [localLog, setLocalLog] = useState<EventSnapshot[]>([]);
 
+  const session = useSessionLifecycle({
+    videoId: DEMO_VIDEO_ID,
+    autoRecover: true,
+  });
+
   const pipeline = useAttentionPipeline({
+    sessionId: session.sessionId,
     videoId: DEMO_VIDEO_ID,
     telemetryIntervalMs: 1000,
     autoConnect: true,
@@ -69,17 +78,35 @@ export default function LearnPage() {
     getAttentionScore: () => pipeline.attentionScore,
   });
 
+  // Sync event logger context whenever session settles
+  useEffect(() => {
+    if (session.sessionId) {
+      getEventService().setContext({
+        sessionId: session.sessionId,
+        videoId: DEMO_VIDEO_ID,
+      });
+    }
+  }, [session.sessionId]);
+
   const handlePlayerEvent = useCallback(
     (
       type: Parameters<typeof pipeline.onPlayerEvent>[0],
       payload: Parameters<typeof pipeline.onPlayerEvent>[1],
       meta: Parameters<typeof pipeline.onPlayerEvent>[2]
     ) => {
-      // Core pipeline: face + player → session-bound WS telemetry
       pipeline.onPlayerEvent(type, payload, meta);
 
-      // REST event logger (batch to FastAPI)
-      onPlayerEvent(type, payload, meta);
+      // Only queue REST events when session is writable
+      if (session.canWrite()) {
+        onPlayerEvent(type, payload, meta);
+      }
+
+      if (type === "VIDEO_END") {
+        void session.end(false);
+      }
+      if (type === "PAUSE") {
+        // soft pause marker only — full PAUSED status on tab hide optional
+      }
 
       if (type !== "TIME_UPDATE") {
         const snap: EventSnapshot = {
@@ -93,12 +120,28 @@ export default function LearnPage() {
           volume: meta.volume,
           muted: meta.muted,
           videoSrc: meta.videoSrc,
+          sessionId: session.sessionId,
+          videoId: DEMO_VIDEO_ID,
         };
         setLocalLog((prev) => [snap, ...prev].slice(0, 25));
       }
     },
-    [pipeline, onPlayerEvent]
+    [pipeline, onPlayerEvent, session]
   );
+
+  const onCameraError = useCallback(() => {
+    // Camera permission denied — same session_id, log via event service if writable
+    if (!session.canWrite()) return;
+    getEventService().log("CUSTOM", {
+      currentTime: 0,
+      playbackSpeed: 1,
+      buffer: 0,
+      fullscreen: false,
+      sessionId: session.sessionId,
+      videoId: DEMO_VIDEO_ID,
+      meta: { reason: "camera_denied" },
+    });
+  }, [session]);
 
   return (
     <div>
@@ -109,7 +152,10 @@ export default function LearnPage() {
 
       <div className="mb-4 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
         <Badge variant="outline" className="font-mono">
-          session: {pipeline.sessionId.slice(0, 8)}…
+          session: {session.sessionId ? `${session.sessionId.slice(0, 8)}…` : "booting…"}
+        </Badge>
+        <Badge variant={session.isWritable ? "default" : "destructive"}>
+          {session.status}
         </Badge>
         <Badge variant={pipeline.connectionStatus === "connected" ? "default" : "secondary"}>
           WS {pipeline.connectionStatus}
@@ -140,12 +186,13 @@ export default function LearnPage() {
               onEvent={handlePlayerEvent}
               onVideoEnd={() => {
                 void flush();
+                void session.end(false);
               }}
             />
           </motion.div>
 
           <RealtimeLearningPanel
-            sessionId={pipeline.sessionId}
+            sessionId={session.sessionId ?? pipeline.sessionId}
             videoId={DEMO_VIDEO_ID}
             autoConnect={false}
           />
@@ -156,9 +203,8 @@ export default function LearnPage() {
                 <div>
                   <CardTitle>Building Focus Metrics</CardTitle>
                   <CardDescription className="mt-1">
-                    Core pipeline: Face Landmarker → attention score → session telemetry →
-                    WebSocket adaptive engine → playback rate. Seek-forward into a difficult
-                    section (40–80%) with low attention slows to 0.8x.
+                    One session_id binds face telemetry, player events, adaptive decisions, and
+                    WebSocket. Closed sessions reject new writes.
                   </CardDescription>
                 </div>
                 <Badge variant="secondary">Module 3</Badge>
@@ -191,20 +237,15 @@ export default function LearnPage() {
                 <div>
                   <CardTitle className="text-base">Event Logger</CardTitle>
                   <CardDescription>
-                    wall-clock ISO · video currentTime · playbackSpeed → FastAPI batch
+                    session_id · video_timestamp · client_timestamp → FastAPI
                   </CardDescription>
                 </div>
                 <div className="flex items-center gap-2">
                   <Badge variant={status.isOnline ? "default" : "destructive"} className="gap-1">
-                    {status.isOnline ? (
-                      <Wifi className="h-3 w-3" />
-                    ) : (
-                      <WifiOff className="h-3 w-3" />
-                    )}
+                    {status.isOnline ? <Wifi className="h-3 w-3" /> : <WifiOff className="h-3 w-3" />}
                     {status.isOnline ? "Online" : "Offline"}
                   </Badge>
                   <Badge variant="outline">Queue: {status.queueLength}</Badge>
-                  {status.isFlushing && <Badge variant="secondary">Flushing…</Badge>}
                   <Button
                     type="button"
                     size="sm"
@@ -216,16 +257,12 @@ export default function LearnPage() {
                   </Button>
                 </div>
               </div>
-              {status.lastError && (
-                <p className="mt-2 text-xs text-destructive">Last error: {status.lastError}</p>
-              )}
             </CardHeader>
             <CardContent>
               <ScrollArea className="h-40 rounded-md border bg-muted/30 p-2">
                 {localLog.length === 0 ? (
                   <p className="p-2 text-xs text-muted-foreground">
-                    Interact with the player — events are debounced and sent to{" "}
-                    <code className="text-[10px]">POST /api/v1/events/batch</code>
+                    Interact with the player — all events carry the same session_id.
                   </p>
                 ) : (
                   <ul className="space-y-1.5 font-mono text-[11px]">
@@ -240,8 +277,6 @@ export default function LearnPage() {
                         <span className="font-semibold text-primary">{e.eventType}</span>
                         <span>t={e.currentTime.toFixed(1)}s</span>
                         <span>{e.playbackSpeed}x</span>
-                        <span>buf={e.buffer.toFixed(0)}%</span>
-                        <span>{e.fullscreen ? "FS" : "win"}</span>
                       </li>
                     ))}
                   </ul>
@@ -261,8 +296,7 @@ export default function LearnPage() {
             <CardHeader className="pb-2">
               <CardTitle className="text-base">Attention Camera</CardTitle>
               <CardDescription>
-                MediaPipe Face Landmarker (~30 FPS). Scores feed the same session as the
-                WebSocket adaptive engine.
+                Same session_id as the player — no separate camera session.
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -279,7 +313,6 @@ export default function LearnPage() {
               <CardTitle className="text-base">Course Playlist</CardTitle>
               <CardDescription>Attention-Aware Learning Fundamentals</CardDescription>
               <Progress value={33} className="mt-2 h-1.5" />
-              <p className="text-xs text-muted-foreground">2 of 6 completed</p>
             </CardHeader>
             <Separator />
             <CardContent className="p-0">

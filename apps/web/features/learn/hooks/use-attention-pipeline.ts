@@ -1,58 +1,58 @@
 "use client";
 
 /**
- * Core Attention Pipeline orchestrator (client).
- *
- * Camera → Face Landmarker → attentionScoreFromFace
- *   → session-bound telemetry → WebSocket
- *   → adaptive playbackRate → VideoPlayer
- *
- * Reuses: useRealtimeWebsocket, attentionScoreFromFace, event types.
- * Does not replace face engine, event logger, or WS client.
+ * Core Attention Pipeline — always uses the same session_id as the learning session store.
  */
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRealtimeWebsocket } from "@/hooks/use-realtime-websocket";
+import { useSessionStore } from "@/stores/session-store";
 import {
   attentionScoreFromFace,
   type FaceLandmarkResult,
 } from "@/features/attention";
+import { getEventService } from "../services/event-service";
 import type {
   VideoPlayerEventMeta,
   VideoPlayerEventPayload,
   VideoPlayerEventType,
 } from "../types/video-player";
 
-/** Demo heuristic: middle band of the video is treated as "difficult". */
 export function isDifficultSection(progressPercent: number): boolean {
   return progressPercent >= 40 && progressPercent <= 80;
 }
 
 export interface UseAttentionPipelineOptions {
-  sessionId?: string;
+  /** Prefer session from useSessionLifecycle / store */
+  sessionId?: string | null;
   videoId?: string;
-  /** Min interval between TIME_UPDATE telemetry (ms) */
   telemetryIntervalMs?: number;
   autoConnect?: boolean;
 }
 
 export function useAttentionPipeline(options: UseAttentionPipelineOptions = {}) {
-  const sessionId = useMemo(
-    () =>
-      options.sessionId ??
-      (typeof crypto !== "undefined" && crypto.randomUUID
-        ? crypto.randomUUID()
-        : `session-${Date.now()}`),
-    [options.sessionId]
-  );
-  const videoId = options.videoId ?? "vid-building-focus-metrics";
+  const storeSessionId = useSessionStore((s) => s.sessionId);
+  const storeWritable = useSessionStore((s) => s.isWritable);
+  const setLastVideoTimestamp = useSessionStore((s) => s.setLastVideoTimestamp);
+
+  const sessionId =
+    options.sessionId ||
+    storeSessionId ||
+    (typeof crypto !== "undefined" && crypto.randomUUID
+      ? crypto.randomUUID()
+      : `session-${Date.now()}`);
+  const videoId = options.videoId ?? useSessionStore.getState().videoId ?? "vid-building-focus-metrics";
   const telemetryIntervalMs = options.telemetryIntervalMs ?? 1000;
 
   const [localAttention, setLocalAttention] = useState(0.75);
   const faceRef = useRef<FaceLandmarkResult | null>(null);
   const lastTelemetryAt = useRef(0);
-  const lastVideoTime = useRef(0);
   const lastDuration = useRef(0);
+
+  // Keep event logger context in sync
+  useEffect(() => {
+    getEventService().setContext({ sessionId, videoId });
+  }, [sessionId, videoId]);
 
   const {
     connectionStatus,
@@ -72,8 +72,7 @@ export function useAttentionPipeline(options: UseAttentionPipelineOptions = {}) 
 
   const onFaceResult = useCallback((r: FaceLandmarkResult) => {
     faceRef.current = r;
-    const score = attentionScoreFromFace(r);
-    setLocalAttention(score);
+    setLocalAttention(attentionScoreFromFace(r));
   }, []);
 
   const emitTelemetry = useCallback(
@@ -83,15 +82,21 @@ export function useAttentionPipeline(options: UseAttentionPipelineOptions = {}) 
       progressPercent: number;
       seekDeltaSeconds?: number;
     }) => {
+      // Prevent writes when session is closed
+      if (!useSessionStore.getState().canWrite() && storeSessionId) {
+        return;
+      }
+
       const face = faceRef.current;
       const attention = face ? attentionScoreFromFace(face) : localAttention;
       setLocalAttention(attention);
+      setLastVideoTimestamp(args.progressSeconds);
 
       sendTelemetry({
         progressSeconds: args.progressSeconds,
         progressPercent: args.progressPercent,
         attentionScore: attention,
-        currentEmotion: "neutral", // heuristic only — no DL emotion yet
+        currentEmotion: "neutral",
         gazeX: face?.gaze.x ?? null,
         gazeY: face?.gaze.y ?? null,
         eventType: args.eventType,
@@ -100,7 +105,7 @@ export function useAttentionPipeline(options: UseAttentionPipelineOptions = {}) 
         isDifficultSection: isDifficultSection(args.progressPercent),
       });
     },
-    [localAttention, sendTelemetry]
+    [localAttention, sendTelemetry, setLastVideoTimestamp, storeSessionId]
   );
 
   const onPlayerEvent = useCallback(
@@ -110,7 +115,7 @@ export function useAttentionPipeline(options: UseAttentionPipelineOptions = {}) 
       meta: VideoPlayerEventMeta
     ) => {
       const videoTime = meta.currentTime;
-      lastVideoTime.current = videoTime;
+      setLastVideoTimestamp(videoTime);
 
       if (type === "TIME_UPDATE") {
         const p = payload as VideoPlayerEventPayload["TIME_UPDATE"];
@@ -129,11 +134,10 @@ export function useAttentionPipeline(options: UseAttentionPipelineOptions = {}) 
       if (type === "SEEK_FORWARD") {
         const p = payload as VideoPlayerEventPayload["SEEK_FORWARD"];
         const duration = lastDuration.current || 1;
-        const progressPercent = Math.min(100, (p.to / duration) * 100);
         emitTelemetry({
           eventType: "SEEK_FORWARD",
           progressSeconds: p.to,
-          progressPercent,
+          progressPercent: Math.min(100, (p.to / duration) * 100),
           seekDeltaSeconds: p.delta,
         });
         return;
@@ -142,17 +146,15 @@ export function useAttentionPipeline(options: UseAttentionPipelineOptions = {}) 
       if (type === "SEEK_BACKWARD") {
         const p = payload as VideoPlayerEventPayload["SEEK_BACKWARD"];
         const duration = lastDuration.current || 1;
-        const progressPercent = Math.min(100, (p.to / duration) * 100);
         emitTelemetry({
           eventType: "SEEK_BACKWARD",
           progressSeconds: p.to,
-          progressPercent,
+          progressPercent: Math.min(100, (p.to / duration) * 100),
           seekDeltaSeconds: -p.delta,
         });
         return;
       }
 
-      // PLAY / PAUSE / SPEED_CHANGE / VIDEO_END — still session-bound samples
       if (
         type === "PLAY" ||
         type === "PAUSE" ||
@@ -167,17 +169,15 @@ export function useAttentionPipeline(options: UseAttentionPipelineOptions = {}) 
         });
       }
     },
-    [emitTelemetry, telemetryIntervalMs]
+    [emitTelemetry, telemetryIntervalMs, setLastVideoTimestamp]
   );
 
   return {
     sessionId,
     videoId,
-    /** Live face-derived score (local) */
+    isWritable: storeWritable,
     attentionScore: localAttention,
-    /** Store score after last telemetry ack path */
     storeAttention,
-    /** Adaptive rate from FastAPI engine — bind to VideoPlayer.externalPlaybackRate */
     adaptivePlaybackRate: playbackRate,
     adaptiveAction,
     adaptiveReason,
