@@ -68,3 +68,19 @@ class EventRepository:
             .limit(limit)
         )
         return list(result.scalars().all())
+
+    async def list_by_session_ordered(
+        self, session_id: UUID, *, limit: int = 2000
+    ) -> list[InteractionEvent]:
+        """ORDER BY video_timestamp, client_timestamp for session reconstruction."""
+        result = await self.session.execute(
+            select(InteractionEvent)
+            .where(InteractionEvent.session_id == session_id)
+            .order_by(
+                InteractionEvent.video_timestamp.asc().nulls_last(),
+                InteractionEvent.client_timestamp.asc().nulls_last(),
+                InteractionEvent.created_at.asc(),
+            )
+            .limit(limit)
+        )
+        return list(result.scalars().all())

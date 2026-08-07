@@ -7,7 +7,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.infrastructure.database.models.session import LearningSession, SessionStatus
-from app.infrastructure.database.models.video import Video
 
 
 class SessionRepository:
@@ -68,9 +67,7 @@ class SessionRepository:
             select(LearningSession).where(
                 LearningSession.user_id == user_id,
                 LearningSession.video_id == video_id,
-                LearningSession.status.in_(
-                    [SessionStatus.IN_PROGRESS, SessionStatus.PAUSED]
-                ),
+                LearningSession.status.in_([SessionStatus.ACTIVE, SessionStatus.PAUSED]),
             )
         )
         return result.scalar_one_or_none()

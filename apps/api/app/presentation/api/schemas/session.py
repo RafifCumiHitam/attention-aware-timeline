@@ -12,6 +12,11 @@ class SessionCreate(BaseModel):
     video_id: UUID
 
 
+class SessionRecover(BaseModel):
+    session_id: UUID | None = None
+    video_id: UUID | None = None
+
+
 class SessionUpdate(BaseModel):
     status: SessionStatus | None = None
     progress_seconds: int | None = Field(default=None, ge=0)
@@ -45,5 +50,13 @@ class SessionResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-class SessionWithVideo(SessionResponse):
-    video_title: str | None = None
+class SessionTimelineItem(BaseModel):
+    id: UUID
+    event_type: str
+    video_timestamp: float | None = None
+    client_timestamp: datetime | None = None
+    attention_score: float | None = None
+    payload: dict | None = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)

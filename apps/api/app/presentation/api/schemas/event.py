@@ -11,9 +11,10 @@ from app.infrastructure.database.models.event import EventType
 
 class EventCreate(BaseModel):
     event_type: EventType
-    session_id: UUID | None = None
+    session_id: UUID  # required — canonical learning session
     video_id: UUID | None = None
     video_timestamp: float | None = Field(default=None, ge=0)
+    client_timestamp: datetime | str | None = None
     attention_score: float | None = Field(default=None, ge=0, le=100)
     gaze_x: float | None = None
     gaze_y: float | None = None
@@ -31,6 +32,7 @@ class EventResponse(BaseModel):
     video_id: UUID | None = None
     event_type: EventType
     video_timestamp: float | None = None
+    client_timestamp: datetime | None = None
     attention_score: float | None = None
     gaze_x: float | None = None
     gaze_y: float | None = None
