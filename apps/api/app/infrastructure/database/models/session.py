@@ -1,4 +1,4 @@
-"""Learning session ORM model."""
+"""Learning session ORM model — canonical session_id for all learning interactions."""
 
 import uuid
 from datetime import datetime
@@ -12,10 +12,31 @@ from app.infrastructure.database.base import Base, TimestampMixin
 
 
 class SessionStatus(str, PyEnum):
-    IN_PROGRESS = "in_progress"
-    COMPLETED = "completed"
-    ABANDONED = "abandoned"
+    """
+    Lifecycle:
+      START  → creates row with ACTIVE
+      ACTIVE → accepting events & telemetry
+      PAUSED → recoverable; events still allowed (resume path)
+      ENDED  → closed; no further writes
+      ABANDONED → closed variant (tab lost / timeout)
+    """
+
+    ACTIVE = "active"
     PAUSED = "paused"
+    ENDED = "ended"
+    ABANDONED = "abandoned"
+
+    # Back-compat aliases used by older code paths
+    IN_PROGRESS = "active"
+    COMPLETED = "ended"
+
+    @classmethod
+    def writable(cls) -> set["SessionStatus"]:
+        return {cls.ACTIVE, cls.PAUSED}
+
+    @classmethod
+    def closed(cls) -> set["SessionStatus"]:
+        return {cls.ENDED, cls.ABANDONED}
 
 
 class LearningSession(Base, TimestampMixin):
@@ -31,9 +52,14 @@ class LearningSession(Base, TimestampMixin):
         UUID(as_uuid=True), ForeignKey("videos.id", ondelete="CASCADE"), nullable=False, index=True
     )
     status: Mapped[SessionStatus] = mapped_column(
-        Enum(SessionStatus, name="session_status", values_callable=lambda x: [e.value for e in x]),
-        default=SessionStatus.IN_PROGRESS,
+        Enum(
+            SessionStatus,
+            name="session_status",
+            values_callable=lambda obj: ["active", "paused", "ended", "abandoned"],
+        ),
+        default=SessionStatus.ACTIVE,
         nullable=False,
+        index=True,
     )
     progress_seconds: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     progress_percent: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
@@ -52,6 +78,10 @@ class LearningSession(Base, TimestampMixin):
     events: Mapped[list["InteractionEvent"]] = relationship(  # noqa: F821
         "InteractionEvent", back_populates="session", cascade="all, delete-orphan"
     )
+
+    @property
+    def is_writable(self) -> bool:
+        return self.status in SessionStatus.writable()
 
     def __repr__(self) -> str:
         return f"<LearningSession {self.id} status={self.status}>"
