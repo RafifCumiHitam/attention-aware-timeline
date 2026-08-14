@@ -7,6 +7,8 @@ import type { FaceLandmarkResult, FaceLandmarkerOptions } from "../types";
 export interface UseFaceLandmarkerOptions extends FaceLandmarkerOptions {
   autoStart?: boolean;
   facingMode?: "user" | "environment";
+  /** Throttle React state updates for UI (ms). Inference callback still fires. */
+  uiUpdateIntervalMs?: number;
 }
 
 export function useFaceLandmarker(options: UseFaceLandmarkerOptions = {}) {
@@ -15,6 +17,7 @@ export function useFaceLandmarker(options: UseFaceLandmarkerOptions = {}) {
     facingMode = "user",
     onResult,
     onError,
+    uiUpdateIntervalMs = 200,
     ...engineOpts
   } = options;
 
@@ -23,6 +26,7 @@ export function useFaceLandmarker(options: UseFaceLandmarkerOptions = {}) {
   const streamRef = useRef<MediaStream | null>(null);
   const onResultRef = useRef(onResult);
   const onErrorRef = useRef(onError);
+  const lastUiUpdate = useRef(0);
   onResultRef.current = onResult;
   onErrorRef.current = onError;
 
@@ -34,10 +38,17 @@ export function useFaceLandmarker(options: UseFaceLandmarkerOptions = {}) {
   useEffect(() => {
     let cancelled = false;
     const engine = new FaceLandmarkerEngine({
+      targetFps: engineOpts.targetFps ?? 10,
+      maxWidth: engineOpts.maxWidth ?? 480,
       ...engineOpts,
       onResult: (r) => {
-        setResult(r);
+        // Always forward to pipeline (ref) — throttle only React state for overlays
         onResultRef.current?.(r);
+        const now = performance.now();
+        if (now - lastUiUpdate.current >= uiUpdateIntervalMs) {
+          lastUiUpdate.current = now;
+          setResult(r);
+        }
       },
       onError: (e) => {
         setError(e.message);
@@ -87,7 +98,8 @@ export function useFaceLandmarker(options: UseFaceLandmarkerOptions = {}) {
           facingMode,
           width: { ideal: 640 },
           height: { ideal: 480 },
-          frameRate: { ideal: 30, max: 30 },
+          // Camera can run 24–30 fps for smooth preview; inference is throttled separately
+          frameRate: { ideal: 24, max: 30 },
         },
       });
       streamRef.current = stream;

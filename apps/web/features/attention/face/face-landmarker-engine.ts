@@ -1,10 +1,6 @@
 /**
- * Browser MediaPipe Face Landmarker — ~30 FPS.
- *
- * IMPORTANT: Do NOT statically import `@mediapipe/tasks-vision`.
- * Turbopack fails on its internal dynamic import (`Can't resolve <dynamic>`).
- * Load the ESM build from jsDelivr at runtime via Function() so the bundler
- * cannot statically analyze the import specifier.
+ * Browser MediaPipe Face Landmarker.
+ * Default ~10 FPS inference (not 30) — keeps camera preview smooth while cutting CPU.
  */
 import { DEFAULT_MODEL_URL, DEFAULT_WASM_PATH } from "./constants";
 import { detectBlink } from "./modules/blink-detection";
@@ -42,7 +38,6 @@ const MEDIAPIPE_ESM =
 
 let visionModulePromise: Promise<MpVisionModule> | null = null;
 
-/** Dynamic import hidden from Turbopack/Webpack static analysis. */
 function runtimeImport(specifier: string): Promise<MpVisionModule> {
   // eslint-disable-next-line @typescript-eslint/no-implied-eval, no-new-func
   const importer = new Function(
@@ -110,8 +105,9 @@ export class FaceLandmarkerEngine {
 
   constructor(options: FaceLandmarkerOptions = {}) {
     this.opts = {
-      targetFps: options.targetFps ?? 30,
-      maxWidth: options.maxWidth ?? 640,
+      // Attention heuristics do not need 30 FPS inference on a laptop.
+      targetFps: options.targetFps ?? 10,
+      maxWidth: options.maxWidth ?? 480,
       wasmPath: options.wasmPath ?? DEFAULT_WASM_PATH,
       modelAssetPath: options.modelAssetPath ?? DEFAULT_MODEL_URL,
       minDetectionConfidence: options.minDetectionConfidence ?? 0.5,

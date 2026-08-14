@@ -1,8 +1,7 @@
 "use client";
 
 /**
- * Core Attention Pipeline — one WebSocket owner via useRealtimeWebsocket.
- * Does NOT invent client session UUIDs for the realtime channel.
+ * Core Attention Pipeline — WS telemetry ~2s, REST attention samples ~3s with delta gate.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -26,7 +25,10 @@ export function isDifficultSection(progressPercent: number): boolean {
 export interface UseAttentionPipelineOptions {
   sessionId?: string | null;
   videoId?: string;
+  /** WS + player-driven telemetry interval (default 2000ms) */
   telemetryIntervalMs?: number;
+  /** REST attention_sample interval (default 3000ms) */
+  persistIntervalMs?: number;
   autoConnect?: boolean;
 }
 
@@ -35,25 +37,23 @@ export function useAttentionPipeline(options: UseAttentionPipelineOptions = {}) 
   const storeWritable = useSessionStore((s) => s.isWritable);
   const setLastVideoTimestamp = useSessionStore((s) => s.setLastVideoTimestamp);
 
-  // Prefer explicit session from lifecycle / page. Never invent a UUID for WS.
   const sessionId = options.sessionId || storeSessionId || null;
+  const videoId = options.videoId ?? useSessionStore.getState().videoId ?? "";
 
-  const videoId =
-    options.videoId ?? useSessionStore.getState().videoId ?? "";
-
-  const telemetryIntervalMs = options.telemetryIntervalMs ?? 1000;
+  const telemetryIntervalMs = options.telemetryIntervalMs ?? 2000;
+  const persistIntervalMs = options.persistIntervalMs ?? 3000;
 
   const [localAttention, setLocalAttention] = useState(0.75);
   const faceRef = useRef<FaceLandmarkResult | null>(null);
   const lastTelemetryAt = useRef(0);
+  const lastPersistAt = useRef(0);
+  const lastPersistedAttention = useRef(-1);
   const lastDuration = useRef(0);
+  const lastUiAttention = useRef(0);
 
   useEffect(() => {
     if (sessionId && videoId) {
-      getEventService().setContext({
-        sessionId,
-        videoId,
-      });
+      getEventService().setContext({ sessionId, videoId });
     }
   }, [sessionId, videoId]);
 
@@ -70,13 +70,17 @@ export function useAttentionPipeline(options: UseAttentionPipelineOptions = {}) 
   } = useRealtimeWebsocket({
     sessionId,
     videoId,
-    // Only connect once we have a real backend session UUID
     autoConnect: (options.autoConnect ?? true) && Boolean(sessionId),
   });
 
   const onFaceResult = useCallback((result: FaceLandmarkResult) => {
     faceRef.current = result;
-    setLocalAttention(attentionScoreFromFace(result));
+    const attention = attentionScoreFromFace(result);
+    // Throttle UI state — avoids re-rendering watch page at inference FPS
+    if (Math.abs(attention - lastUiAttention.current) >= 0.03) {
+      lastUiAttention.current = attention;
+      setLocalAttention(attention);
+    }
   }, []);
 
   const emitTelemetry = useCallback(
@@ -85,6 +89,7 @@ export function useAttentionPipeline(options: UseAttentionPipelineOptions = {}) 
       progressSeconds: number;
       progressPercent: number;
       seekDeltaSeconds?: number;
+      forcePersist?: boolean;
     }) => {
       const store = useSessionStore.getState();
       if (!store.canWrite()) return;
@@ -92,11 +97,15 @@ export function useAttentionPipeline(options: UseAttentionPipelineOptions = {}) 
 
       const face = faceRef.current;
       const attention = face ? attentionScoreFromFace(face) : localAttention;
-      setLocalAttention(attention);
+      if (Math.abs(attention - lastUiAttention.current) >= 0.03) {
+        lastUiAttention.current = attention;
+        setLocalAttention(attention);
+      }
       setLastVideoTimestamp(args.progressSeconds);
 
       const difficultSection = isDifficultSection(args.progressPercent);
 
+      // 1) WebSocket — realtime adaptive path (always for meaningful events)
       sendTelemetry({
         progressSeconds: args.progressSeconds,
         progressPercent: args.progressPercent,
@@ -110,27 +119,52 @@ export function useAttentionPipeline(options: UseAttentionPipelineOptions = {}) 
         isDifficultSection: difficultSection,
       });
 
-      getEventService().log("ATTENTION_SAMPLE", {
-        currentTime: args.progressSeconds,
-        playbackSpeed: 1,
-        buffer: 0,
-        fullscreen: false,
-        attentionScore: attention,
-        sessionId,
-        videoId,
-        meta: {
-          source: "attention_pipeline",
-          eventType: args.eventType,
-          progressPercent: args.progressPercent,
-          gazeX: face?.gaze.x ?? null,
-          gazeY: face?.gaze.y ?? null,
-          currentEmotion: "neutral",
-          seekDeltaSeconds: args.seekDeltaSeconds ?? null,
-          isDifficultSection: difficultSection,
-        },
-      });
+      // 2) REST attention_sample — throttled + delta-gated to cut DB writes
+      const now = Date.now();
+      const delta = Math.abs(attention - lastPersistedAttention.current);
+      const due =
+        args.forcePersist ||
+        now - lastPersistAt.current >= persistIntervalMs ||
+        delta >= 0.12;
+
+      if (due && args.eventType !== "TIME_UPDATE" ? true : due) {
+        // For TIME_UPDATE only persist when due; discrete events always allow persist path
+        if (args.eventType === "TIME_UPDATE" && !due) {
+          return;
+        }
+        if (args.eventType === "TIME_UPDATE" || args.forcePersist || delta >= 0.12) {
+          lastPersistAt.current = now;
+          lastPersistedAttention.current = attention;
+          getEventService().log("ATTENTION_SAMPLE", {
+            currentTime: args.progressSeconds,
+            playbackSpeed: 1,
+            buffer: 0,
+            fullscreen: false,
+            attentionScore: attention,
+            sessionId,
+            videoId,
+            meta: {
+              source: "attention_pipeline",
+              eventType: args.eventType,
+              progressPercent: args.progressPercent,
+              gazeX: face?.gaze.x ?? null,
+              gazeY: face?.gaze.y ?? null,
+              currentEmotion: "neutral",
+              seekDeltaSeconds: args.seekDeltaSeconds ?? null,
+              isDifficultSection: difficultSection,
+            },
+          });
+        }
+      }
     },
-    [localAttention, sendTelemetry, setLastVideoTimestamp, sessionId, videoId]
+    [
+      localAttention,
+      sendTelemetry,
+      setLastVideoTimestamp,
+      sessionId,
+      videoId,
+      persistIntervalMs,
+    ]
   );
 
   const onPlayerEvent = useCallback(
@@ -164,6 +198,7 @@ export function useAttentionPipeline(options: UseAttentionPipelineOptions = {}) 
           progressSeconds: p.to,
           progressPercent: Math.min(100, (p.to / duration) * 100),
           seekDeltaSeconds: p.delta,
+          forcePersist: true,
         });
         return;
       }
@@ -176,6 +211,7 @@ export function useAttentionPipeline(options: UseAttentionPipelineOptions = {}) 
           progressSeconds: p.to,
           progressPercent: Math.min(100, (p.to / duration) * 100),
           seekDeltaSeconds: -p.delta,
+          forcePersist: true,
         });
         return;
       }
@@ -191,6 +227,7 @@ export function useAttentionPipeline(options: UseAttentionPipelineOptions = {}) 
           eventType: type,
           progressSeconds: videoTime,
           progressPercent: Math.min(100, (videoTime / duration) * 100),
+          forcePersist: true,
         });
       }
     },

@@ -2,7 +2,7 @@
 
 /**
  * YouTube IFrame Player adapter — maps YT API → generic player events.
- * Attention pipeline / event logger never see YouTube-specific types.
+ * Poll interval 1000ms (was 500ms) — SEEK still detected at ≥2.5s jumps.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -32,6 +32,8 @@ export interface YouTubePlayerProps {
     meta: VideoPlayerEventMeta
   ) => void;
   onVideoEnd?: () => void;
+  /** Poll currentTime interval (ms). Default 1000. */
+  pollIntervalMs?: number;
 }
 
 function loadYouTubeAPI(): Promise<void> {
@@ -61,11 +63,13 @@ export function YouTubePlayer({
   externalPlaybackRate,
   onEvent,
   onVideoEnd,
+  pollIntervalMs = 1000,
 }: YouTubePlayerProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const playerRef = useRef<any>(null);
   const lastTimeRef = useRef(0);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const playingRef = useRef(false);
   const [ready, setReady] = useState(false);
 
   const emit = useCallback(
@@ -111,15 +115,22 @@ export function YouTubePlayer({
               try {
                 playerRef.current.setPlaybackRate(externalPlaybackRate);
               } catch {
-                /* rate not supported for some videos */
+                /* ignore */
               }
             }
           },
           onStateChange: (e: { data: number }) => {
-            // YT.PlayerState: PLAYING=1 PAUSED=2 ENDED=0
-            if (e.data === 1) emit("PLAY", {});
-            if (e.data === 2) emit("PAUSE", {});
+            // YT.PlayerState: PLAYING=1 PAUSED=2 ENDED=0 BUFFERING=3
+            if (e.data === 1) {
+              playingRef.current = true;
+              emit("PLAY", {});
+            }
+            if (e.data === 2) {
+              playingRef.current = false;
+              emit("PAUSE", {});
+            }
             if (e.data === 0) {
+              playingRef.current = false;
               emit("VIDEO_END", {});
               onVideoEnd?.();
             }
@@ -133,17 +144,19 @@ export function YouTubePlayer({
       pollRef.current = setInterval(() => {
         const p = playerRef.current;
         if (!p?.getCurrentTime) return;
+        // Skip TIME_UPDATE work while paused — still detect seeks if user scrubs
         const t = p.getCurrentTime();
         const duration = p.getDuration?.() ?? 0;
         const prev = lastTimeRef.current;
         const delta = t - prev;
+
         if (Math.abs(delta) >= 2.5) {
           if (delta > 0) {
             emit("SEEK_FORWARD", { from: prev, to: t, delta });
           } else {
             emit("SEEK_BACKWARD", { from: prev, to: t, delta: Math.abs(delta) });
           }
-        } else if (Math.abs(delta) >= 0.4) {
+        } else if (playingRef.current && Math.abs(delta) >= 0.5) {
           emit("TIME_UPDATE", {
             currentTime: t,
             duration,
@@ -151,7 +164,7 @@ export function YouTubePlayer({
           });
         }
         lastTimeRef.current = t;
-      }, 500);
+      }, pollIntervalMs);
     }
 
     void boot();
@@ -167,7 +180,7 @@ export function YouTubePlayer({
       playerRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [youtubeVideoId]);
+  }, [youtubeVideoId, pollIntervalMs]);
 
   useEffect(() => {
     if (!ready || externalPlaybackRate == null) return;

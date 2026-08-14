@@ -11,8 +11,6 @@ from app.core.config import get_settings
 
 
 class Base(DeclarativeBase):
-    """Base class for all ORM models."""
-
     pass
 
 
@@ -40,10 +38,11 @@ def get_engine():
         settings = get_settings()
         _engine = create_async_engine(
             settings.database_url,
-            echo=settings.is_development,
+            # Never bind echo to is_development — that floods logs during learning.
+            echo=settings.database_echo,
             pool_pre_ping=True,
-            pool_size=10,
-            max_overflow=20,
+            pool_size=settings.database_pool_size,
+            max_overflow=settings.database_max_overflow,
         )
     return _engine
 

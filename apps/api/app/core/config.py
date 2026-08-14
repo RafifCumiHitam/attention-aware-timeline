@@ -33,6 +33,10 @@ class Settings(BaseSettings):
         default="postgresql://aat_user:change_me_strong_password@localhost:5432/attention_aware_timeline",
         alias="DATABASE_URL_SYNC",
     )
+    # SQLAlchemy echo — extremely expensive in local loops. Default OFF.
+    database_echo: bool = Field(default=False, alias="DATABASE_ECHO")
+    database_pool_size: int = Field(default=5, alias="DATABASE_POOL_SIZE")
+    database_max_overflow: int = Field(default=10, alias="DATABASE_MAX_OVERFLOW")
 
     jwt_secret_key: str = Field(
         default="change_me_to_a_very_long_random_secret_key_at_least_32_chars",
@@ -49,7 +53,6 @@ class Settings(BaseSettings):
 
     redis_url: str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
 
-    # YouTube Data API — server-side only. NEVER expose to frontend.
     youtube_api_key: str = Field(default="", alias="YOUTUBE_API_KEY")
     youtube_api_base: str = Field(
         default="https://www.googleapis.com/youtube/v3", alias="YOUTUBE_API_BASE"

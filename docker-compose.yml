@@ -1,11 +1,11 @@
 # =============================================================================
 # Attention-Aware Timeline - Docker Compose (Development)
+# AI service is optional (profile: ai) — saves CPU/RAM during learning tests.
+# Start full stack: docker compose --profile ai up
+# Lean stack:       docker compose up postgres redis api web
 # =============================================================================
 
 services:
-  # ---------------------------------------------------------------------------
-  # PostgreSQL Database
-  # ---------------------------------------------------------------------------
   postgres:
     image: postgres:16-alpine
     container_name: aat-postgres-dev
@@ -28,9 +28,6 @@ services:
     networks:
       - aat-dev-network
 
-  # ---------------------------------------------------------------------------
-  # Redis Cache & Session Store
-  # ---------------------------------------------------------------------------
   redis:
     image: redis:7-alpine
     container_name: aat-redis-dev
@@ -39,7 +36,7 @@ services:
       - "${REDIS_PORT:-6379}:6379"
     volumes:
       - redis_dev_data:/data
-    command: redis-server --appendonly yes
+    command: redis-server --appendonly yes --save ""
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -48,9 +45,6 @@ services:
     networks:
       - aat-dev-network
 
-  # ---------------------------------------------------------------------------
-  # Backend API (FastAPI - Hot Reload Enabled)
-  # ---------------------------------------------------------------------------
   api:
     build:
       context: .
@@ -63,6 +57,8 @@ services:
         required: false
     environment:
       ENVIRONMENT: development
+      DATABASE_ECHO: ${DATABASE_ECHO:-false}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-aat_user}:${POSTGRES_PASSWORD:-change_me_strong_password}@postgres:5432/${POSTGRES_DB:-attention_aware_timeline}
       DATABASE_URL_SYNC: postgresql://${POSTGRES_USER:-aat_user}:${POSTGRES_PASSWORD:-change_me_strong_password}@postgres:5432/${POSTGRES_DB:-attention_aware_timeline}
       REDIS_URL: redis://redis:6379/0
@@ -85,10 +81,9 @@ services:
     networks:
       - aat-dev-network
 
-  # ---------------------------------------------------------------------------
-  # AI Service (FastAPI + PyTorch - Hot Reload Enabled)
-  # ---------------------------------------------------------------------------
+  # Heavy (PyTorch) — only when explicitly enabled
   ai:
+    profiles: ["ai"]
     build:
       context: .
       dockerfile: infra/docker/ai/Dockerfile
@@ -116,9 +111,6 @@ services:
     networks:
       - aat-dev-network
 
-  # ---------------------------------------------------------------------------
-  # Frontend Web App (Next.js - Hot Reload Enabled)
-  # ---------------------------------------------------------------------------
   web:
     build:
       context: .
@@ -142,8 +134,6 @@ services:
     depends_on:
       api:
         condition: service_healthy
-      ai:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000"]
       interval: 15s
@@ -153,10 +143,8 @@ services:
     networks:
       - aat-dev-network
 
-  # ---------------------------------------------------------------------------
-  # Nginx Reverse Proxy (Development)
-  # ---------------------------------------------------------------------------
   nginx:
+    profiles: ["proxy"]
     image: nginx:1.27-alpine
     container_name: aat-nginx-dev
     restart: unless-stopped
@@ -168,8 +156,6 @@ services:
       web:
         condition: service_healthy
       api:
-        condition: service_healthy
-      ai:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost/healthz"]

@@ -51,11 +51,14 @@ def setup_logging() -> None:
     root.addHandler(handler)
     root.setLevel(log_level)
 
-    # Quiet noisy loggers
+    # Quiet noisy loggers — SQL echo only when DATABASE_ECHO=true
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
     logging.getLogger("sqlalchemy.engine").setLevel(
-        logging.INFO if settings.is_development else logging.WARNING
+        logging.INFO if settings.database_echo else logging.WARNING
     )
+    logging.getLogger("sqlalchemy.pool").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:
