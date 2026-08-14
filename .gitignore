@@ -72,6 +72,9 @@ postgres_data/
 apps/api/alembic/versions/*.py
 !apps/api/alembic/versions/.gitkeep
 
+#Video
+apps/web/videos/*
+
 # Misc
 *.tmp
 *.temp

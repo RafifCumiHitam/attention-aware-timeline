@@ -7,7 +7,10 @@
 
 import { useCallback, useEffect, useRef } from "react";
 import apiClient from "@/lib/api-client";
-import { useSessionStore, type SessionLifecycle } from "@/stores/session-store";
+import {
+  useSessionStore,
+  type SessionLifecycle,
+} from "@/stores/session-store";
 import { getEventService } from "../services/event-service";
 
 export interface UseSessionLifecycleOptions {
@@ -16,7 +19,9 @@ export interface UseSessionLifecycleOptions {
   autoRecover?: boolean;
 }
 
-export function useSessionLifecycle(options: UseSessionLifecycleOptions) {
+export function useSessionLifecycle(
+  options: UseSessionLifecycleOptions
+) {
   const { videoId, autoRecover = true } = options;
   const bootstrapped = useRef(false);
 
@@ -36,6 +41,7 @@ export function useSessionLifecycle(options: UseSessionLifecycleOptions) {
       started_at?: string;
     }) => {
       const st = data.status as SessionLifecycle;
+
       setSession({
         sessionId: data.id,
         videoId: data.video_id,
@@ -43,16 +49,24 @@ export function useSessionLifecycle(options: UseSessionLifecycleOptions) {
         status: st,
         startedAt: data.started_at,
       });
-      getEventService().setContext({ sessionId: data.id, videoId: data.video_id });
+
+      getEventService().setContext({
+        sessionId: data.id,
+        videoId: data.video_id,
+      });
     },
     [setSession]
   );
 
-  /** START or recover ACTIVE/PAUSED for this video */
+  /**
+   * Start or recover an ACTIVE/PAUSED session.
+   */
   const ensureSession = useCallback(async () => {
     const store = useSessionStore.getState();
 
-    // Local recovery first
+    // ---------------------------------------------------------
+    // 1. Try local session recovery first
+    // ---------------------------------------------------------
     if (
       store.sessionId &&
       store.videoId === videoId &&
@@ -62,101 +76,161 @@ export function useSessionLifecycle(options: UseSessionLifecycleOptions) {
         const { data } = await apiClient.post("/sessions/recover", {
           session_id: store.sessionId,
         });
+
         applyServerSession(data);
+
         return data.id as string;
-      } catch {
-        // fall through to start
+      } catch (err) {
+        console.warn(
+          "[Session] Recovery failed; starting new session",
+          err
+        );
       }
     }
 
+    // ---------------------------------------------------------
+    // 2. Start a new server session
+    // ---------------------------------------------------------
     try {
-      const { data } = await apiClient.post("/sessions", { video_id: videoId });
+      const { data } = await apiClient.post("/sessions", {
+        video_id: videoId,
+      });
+
       applyServerSession(data);
+
       return data.id as string;
     } catch (err) {
-      // Offline / unauthenticated — use local UUID still (WS works; REST may queue)
+      // -------------------------------------------------------
+      // 3. Offline / unauthenticated fallback
+      // -------------------------------------------------------
       const localId =
         store.sessionId && store.videoId === videoId
           ? store.sessionId
           : typeof crypto !== "undefined" && crypto.randomUUID
             ? crypto.randomUUID()
             : `local-${Date.now()}`;
+
       setSession({
         sessionId: localId,
         videoId,
         status: "active",
       });
-      getEventService().setContext({ sessionId: localId, videoId });
-      console.warn("[Session] API start failed; using local session", err);
+
+      getEventService().setContext({
+        sessionId: localId,
+        videoId,
+      });
+
+      console.warn(
+        "[Session] API start failed; using local session",
+        err
+      );
+
       return localId;
     }
   }, [videoId, applyServerSession, setSession]);
 
+  /**
+   * Pause current session.
+   */
   const pause = useCallback(async () => {
     const id = useSessionStore.getState().sessionId;
+
     if (!id) return;
+
     setStatus("paused");
+
     try {
       await apiClient.post(`/sessions/${id}/pause`);
-    } catch {
-      /* offline ok */
+    } catch (err) {
+      console.warn("[Session] Pause request failed", err);
     }
   }, [setStatus]);
 
+  /**
+   * Resume current session.
+   */
   const resume = useCallback(async () => {
     const id = useSessionStore.getState().sessionId;
+
     if (!id) return;
+
     setStatus("active");
+
     try {
       await apiClient.post(`/sessions/${id}/resume`);
-    } catch {
-      /* offline ok */
+    } catch (err) {
+      console.warn("[Session] Resume request failed", err);
     }
   }, [setStatus]);
 
+  /**
+   * End current session.
+   */
   const end = useCallback(
     async (abandoned = false) => {
       const id = useSessionStore.getState().sessionId;
+
       if (!id) return;
+
       setStatus(abandoned ? "abandoned" : "ended");
+
       try {
         await apiClient.post(`/sessions/${id}/end`, null, {
           params: { abandoned },
         });
-      } catch {
-        /* offline ok */
+      } catch (err) {
+        console.warn("[Session] End request failed", err);
       }
+
       await getEventService().flush();
     },
     [setStatus]
   );
 
-  // Bootstrap once
+  // -----------------------------------------------------------
+  // Bootstrap session once
+  // -----------------------------------------------------------
   useEffect(() => {
-    if (!autoRecover || bootstrapped.current) return;
+    if (!autoRecover || bootstrapped.current) {
+      return;
+    }
+
     bootstrapped.current = true;
+
     void ensureSession();
   }, [autoRecover, ensureSession]);
 
-  // Tab visibility → pause / resume markers + flush
+  // -----------------------------------------------------------
+  // Tab visibility
+  // -----------------------------------------------------------
   useEffect(() => {
     const onVis = () => {
       if (document.visibilityState === "hidden") {
         void getEventService().flush();
-        // Do not auto-end; mark PAUSE path via event logger if writable
       }
     };
+
     document.addEventListener("visibilitychange", onVis);
-    return () => document.removeEventListener("visibilitychange", onVis);
+
+    return () => {
+      document.removeEventListener("visibilitychange", onVis);
+    };
   }, []);
 
-  // pagehide / unload → flush (keep session PAUSED recoverable)
+  // -----------------------------------------------------------
+  // Page unload
+  // -----------------------------------------------------------
   useEffect(() => {
     const onHide = () => {
       void getEventService().flush();
     };
+
     window.addEventListener("pagehide", onHide);
-    return () => window.removeEventListener("pagehide", onHide);
+
+    return () => {
+      window.removeEventListener("pagehide", onHide);
+    };
   }, []);
 
   return {

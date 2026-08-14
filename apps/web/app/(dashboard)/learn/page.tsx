@@ -42,7 +42,7 @@ const lessons = [
 ];
 
 const DEMO_VIDEO =
-  "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
+  "/videos/building-focus-metrics.mp4";
 
 const DEMO_SUBTITLES = [
   {
@@ -302,7 +302,7 @@ export default function LearnPage() {
             <CardContent>
               <FaceTrackerLazy
                 className="aspect-video w-full"
-                autoStart={false}
+                autoStart={true}
                 onResult={pipeline.onFaceResult}
               />
             </CardContent>
