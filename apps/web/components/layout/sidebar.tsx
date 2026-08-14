@@ -26,6 +26,7 @@ import { useSidebarStore } from "@/stores/sidebar-store";
 const navItems = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/learn", label: "Video Learning", icon: PlayCircle },
+  { href: "/learn/modules", label: "Modules", icon: BookOpen },
   { href: "/timeline", label: "Timeline", icon: Route },
   { href: "/sessions", label: "Sessions", icon: BookOpen },
   { href: "/analytics", label: "Analytics", icon: BarChart3 },
@@ -49,7 +50,10 @@ export function Sidebar() {
     label: string;
     icon: React.ElementType;
   }) => {
-    const isActive = pathname === href || pathname.startsWith(`${href}/`);
+    const isActive =
+      href === "/learn"
+        ? pathname === "/learn"
+        : pathname === href || pathname.startsWith(`${href}/`);
 
     return (
       <Link
