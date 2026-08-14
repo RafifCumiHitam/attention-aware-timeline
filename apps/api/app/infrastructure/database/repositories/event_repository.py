@@ -84,3 +84,40 @@ class EventRepository:
             .limit(limit)
         )
         return list(result.scalars().all())
+
+    async def list_for_difficulty(
+        self,
+        *,
+        user_id: UUID,
+        video_id: UUID,
+        session_id: UUID | None = None,
+        limit: int = 8000,
+    ) -> list[InteractionEvent]:
+        """Events for Behavioral Difficulty Score (user-scoped, video timeline order)."""
+        filters = [
+            InteractionEvent.user_id == user_id,
+            InteractionEvent.video_id == video_id,
+            InteractionEvent.event_type.in_(
+                [
+                    EventType.PLAY,
+                    EventType.PAUSE,
+                    EventType.SEEK,
+                    EventType.SEEK_FORWARD,
+                    EventType.SEEK_BACKWARD,
+                    EventType.COMPLETE,
+                ]
+            ),
+        ]
+        if session_id is not None:
+            filters.append(InteractionEvent.session_id == session_id)
+
+        result = await self.session.execute(
+            select(InteractionEvent)
+            .where(*filters)
+            .order_by(
+                InteractionEvent.client_timestamp.asc().nulls_last(),
+                InteractionEvent.created_at.asc(),
+            )
+            .limit(limit)
+        )
+        return list(result.scalars().all())

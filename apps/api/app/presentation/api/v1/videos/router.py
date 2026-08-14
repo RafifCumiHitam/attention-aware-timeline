@@ -5,10 +5,13 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services.difficulty_timeline_service import DifficultyTimelineService
 from app.application.services.video_service import VideoService
+from app.domain.value_objects.difficulty_weights import DEFAULT_BUCKET_SECONDS
 from app.infrastructure.database.base import get_db
 from app.infrastructure.database.models.user import User
 from app.presentation.api.schemas.common import MessageResponse, PaginatedResponse
+from app.presentation.api.schemas.difficulty import DifficultyTimelineResponse
 from app.presentation.api.schemas.video import (
     VideoCreate,
     VideoListItem,
@@ -61,6 +64,34 @@ async def create_video(
 ) -> VideoResponse:
     video = await VideoService(db).create(body, current_user)
     return VideoResponse.model_validate(video)
+
+
+@router.get(
+    "/{video_id}/difficulty-timeline",
+    response_model=DifficultyTimelineResponse,
+    summary="Behavioral Difficulty Score timeline (10s buckets by default)",
+)
+async def difficulty_timeline(
+    video_id: UUID,
+    bucket_seconds: float = Query(DEFAULT_BUCKET_SECONDS, ge=5.0, le=60.0),
+    session_id: UUID | None = Query(None),
+    include_empty: bool = Query(False),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> DifficultyTimelineResponse:
+    """
+    Heuristic Behavioral Difficulty Score from pause/seek/replay/revisit patterns.
+    Not scientifically validated. No emotion or Deep Learning.
+    """
+    scope = "session" if session_id else "user"
+    return await DifficultyTimelineService(db).get_for_video(
+        current_user,
+        video_id,
+        bucket_seconds=bucket_seconds,
+        session_id=session_id,
+        scope=scope,
+        include_empty=include_empty,
+    )
 
 
 @router.get("/{video_id}", response_model=VideoResponse, summary="Get video")
