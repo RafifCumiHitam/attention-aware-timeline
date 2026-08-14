@@ -33,6 +33,17 @@ function scheduleStoreUpdate(fn: () => void): void {
   }
 }
 
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export function isValidSessionId(id: string | null | undefined): boolean {
+  if (!id || typeof id !== "string") return false;
+  const trimmed = id.trim();
+  if (!trimmed) return false;
+  if (trimmed.startsWith("demo-") || trimmed.startsWith("session-")) return false;
+  return UUID_RE.test(trimmed);
+}
+
 export class WebSocketClient {
   private ws: WebSocket | null = null;
   private url: string;
@@ -58,13 +69,13 @@ export class WebSocketClient {
       process.env.NEXT_PUBLIC_WS_URL ||
       "ws://localhost:8000/api/v1/ws/learning";
 
-    this.sessionId = options.sessionId || "demo-session-1";
-    this.userId = options.userId || "demo-user-1";
+    this.sessionId = options.sessionId || "";
+    this.userId = options.userId || "";
     this.token = options.token || null;
 
     const queryParams = new URLSearchParams({
       session_id: this.sessionId,
-      user_id: this.userId,
+      user_id: this.userId || "unknown",
     });
     if (this.token) {
       queryParams.append("token", this.token);
@@ -81,6 +92,11 @@ export class WebSocketClient {
   }
 
   public connect(): void {
+    if (!isValidSessionId(this.sessionId)) {
+      console.warn("[WebSocket] Refusing connect — invalid sessionId:", this.sessionId);
+      return;
+    }
+
     if (
       this.ws &&
       (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)
@@ -97,6 +113,13 @@ export class WebSocketClient {
       store.setConnectionStatus("reconnecting");
     }
 
+    console.log("[WebSocket] Constructor/connect", {
+      sessionId: this.sessionId,
+      userId: this.userId,
+      hasToken: Boolean(this.token),
+      url: this.url.replace(/token=[^&]+/, "token=***"),
+    });
+
     try {
       this.ws = new WebSocket(this.url);
       this.ws.onopen = this.handleOpen.bind(this);
@@ -110,7 +133,10 @@ export class WebSocketClient {
   }
 
   private handleOpen(): void {
-    console.log("[WebSocket] Connected", { sessionId: this.sessionId, url: this.url });
+    console.log("[WebSocket] onopen", {
+      sessionId: this.sessionId,
+      readyState: this.ws?.readyState,
+    });
     const store = useRealtimeStore.getState();
     store.setConnectionStatus("connected");
     store.resetReconnectAttempts();
@@ -159,29 +185,28 @@ export class WebSocketClient {
           break;
 
         default:
-          console.debug("[WebSocket] message:", data);
+          console.debug("[WebSocket] message:", data.type);
       }
     } catch (err) {
       console.warn("[WebSocket] parse error:", err);
     }
   }
 
-  /**
-   * Browser fires `error` with an empty Event before `close` when the server
-   * is unreachable. Do not treat as terminal — let onclose drive reconnect.
-   */
   private handleError(_event: Event): void {
     console.warn(
-      "[WebSocket] Transport error (API may be offline). URL:",
-      this.url,
-      "— ensure FastAPI is running on :8000"
+      "[WebSocket] onerror — transport issue (API offline?). URL base:",
+      this.url.split("?")[0]
     );
-    // Intentionally do NOT set connectionStatus to "error" here.
-    // onclose will set "reconnecting" and scheduleReconnect.
   }
 
   private handleClose(event: CloseEvent): void {
-    console.warn(`[WebSocket] Closed (code: ${event.code})`);
+    console.warn("[WebSocket] onclose", {
+      code: event.code,
+      reason: event.reason || "(empty)",
+      wasClean: event.wasClean,
+      intentional: this.isIntentionallyClosed,
+      sessionId: this.sessionId,
+    });
     this.stopHeartbeat();
 
     if (!this.isIntentionallyClosed) {
@@ -221,7 +246,7 @@ export class WebSocketClient {
 
     this.pongTimeoutTimer = setTimeout(() => {
       console.warn("[WebSocket] Pong timeout — closing stale socket");
-      this.ws?.close();
+      this.ws?.close(4000, "pong_timeout");
     }, this.pingTimeoutMs);
   }
 
@@ -238,6 +263,7 @@ export class WebSocketClient {
 
   private scheduleReconnect(): void {
     if (this.reconnectTimer) return;
+    if (this.isIntentionallyClosed) return;
 
     const store = useRealtimeStore.getState();
     store.incrementReconnectAttempts();
@@ -248,6 +274,8 @@ export class WebSocketClient {
       Math.pow(2, attempts - 1) * 1000 + Math.random() * 500
     );
 
+    console.log(`[WebSocket] scheduleReconnect in ${Math.round(delay)}ms (attempt ${attempts})`);
+
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.connect();
@@ -255,7 +283,6 @@ export class WebSocketClient {
   }
 
   public sendTelemetry(payload: TelemetryPayload): void {
-    // Optimistic UI update — deferred to avoid "setState while rendering"
     scheduleStoreUpdate(() => {
       useRealtimeStore.getState().updateTelemetry({
         progressSeconds: payload.progressSeconds,
@@ -300,6 +327,7 @@ export class WebSocketClient {
   }
 
   public disconnect(): void {
+    console.log("[WebSocket] disconnect() intentional", { sessionId: this.sessionId });
     this.isIntentionallyClosed = true;
     this.stopHeartbeat();
     if (this.reconnectTimer) {
@@ -307,9 +335,79 @@ export class WebSocketClient {
       this.reconnectTimer = null;
     }
     if (this.ws) {
-      this.ws.close();
+      try {
+        this.ws.close(1000, "client_disconnect");
+      } catch {
+        /* ignore */
+      }
       this.ws = null;
     }
     useRealtimeStore.getState().setConnectionStatus("disconnected");
   }
+}
+
+// ---------------------------------------------------------------------------
+// Ref-counted registry — survives React StrictMode mount→cleanup→remount
+// ---------------------------------------------------------------------------
+
+interface RegistryEntry {
+  client: WebSocketClient;
+  refCount: number;
+  releaseTimer: ReturnType<typeof setTimeout> | null;
+}
+
+const registry = new Map<string, RegistryEntry>();
+
+export function acquireWebSocketClient(options: {
+  sessionId: string;
+  userId: string;
+  token?: string | null;
+}): WebSocketClient | null {
+  if (!isValidSessionId(options.sessionId)) {
+    console.warn("[WebSocket] acquire refused — invalid sessionId", options.sessionId);
+    return null;
+  }
+
+  const key = options.sessionId;
+  let entry = registry.get(key);
+
+  if (entry?.releaseTimer) {
+    clearTimeout(entry.releaseTimer);
+    entry.releaseTimer = null;
+  }
+
+  if (!entry) {
+    const client = new WebSocketClient({
+      sessionId: options.sessionId,
+      userId: options.userId,
+      token: options.token,
+    });
+    entry = { client, refCount: 0, releaseTimer: null };
+    registry.set(key, entry);
+    client.connect();
+  }
+
+  entry.refCount += 1;
+  console.log("[WebSocket] acquire", { key, refCount: entry.refCount });
+  return entry.client;
+}
+
+export function releaseWebSocketClient(sessionId: string): void {
+  const entry = registry.get(sessionId);
+  if (!entry) return;
+
+  entry.refCount = Math.max(0, entry.refCount - 1);
+  console.log("[WebSocket] release", { sessionId, refCount: entry.refCount });
+
+  if (entry.refCount > 0) return;
+
+  // Defer hard disconnect so StrictMode remount can re-acquire the same socket
+  if (entry.releaseTimer) clearTimeout(entry.releaseTimer);
+  entry.releaseTimer = setTimeout(() => {
+    const current = registry.get(sessionId);
+    if (!current || current.refCount > 0) return;
+    console.log("[WebSocket] deferred disconnect after grace period", { sessionId });
+    current.client.disconnect();
+    registry.delete(sessionId);
+  }, 150);
 }

@@ -1,24 +1,27 @@
 import { useEffect, useRef, useCallback } from "react";
 import { useAuthStore } from "@/stores/auth-store";
 import { useRealtimeStore } from "@/stores/realtime-store";
-import { WebSocketClient, type TelemetryPayload } from "@/lib/websocket-client";
+import {
+  acquireWebSocketClient,
+  releaseWebSocketClient,
+  isValidSessionId,
+  type TelemetryPayload,
+  type WebSocketClient,
+} from "@/lib/websocket-client";
 
 export interface UseRealtimeWebsocketOptions {
-  sessionId?: string;
+  sessionId?: string | null;
   videoId?: string;
   autoConnect?: boolean;
 }
 
 export function useRealtimeWebsocket(options: UseRealtimeWebsocketOptions = {}) {
-  const {
-    sessionId = "demo-session-1",
-    videoId = "demo-video-1",
-    autoConnect = true,
-  } = options;
+  const { sessionId = null, videoId = "", autoConnect = true } = options;
   const token = useAuthStore((state) => state.accessToken);
   const user = useAuthStore((state) => state.user);
 
   const clientRef = useRef<WebSocketClient | null>(null);
+  const activeSessionRef = useRef<string | null>(null);
 
   const connectionStatus = useRealtimeStore((state) => state.connectionStatus);
   const lastPingMs = useRealtimeStore((state) => state.lastPingMs);
@@ -32,19 +35,34 @@ export function useRealtimeWebsocket(options: UseRealtimeWebsocketOptions = {}) 
   const attentionHistory = useRealtimeStore((state) => state.attentionHistory);
 
   useEffect(() => {
-    if (!autoConnect) return;
+    if (!autoConnect) {
+      return;
+    }
 
-    const client = new WebSocketClient({
-      sessionId,
-      userId: user?.id || "demo-user-1",
+    if (!isValidSessionId(sessionId)) {
+      console.log("[useRealtimeWebsocket] skip connect — session not ready", {
+        sessionId,
+      });
+      return;
+    }
+
+    const sid = sessionId as string;
+    const client = acquireWebSocketClient({
+      sessionId: sid,
+      userId: user?.id || "unknown",
       token,
     });
+
     clientRef.current = client;
-    client.connect();
+    activeSessionRef.current = sid;
 
     return () => {
-      client.disconnect();
-      clientRef.current = null;
+      console.log("[useRealtimeWebsocket] effect cleanup", { sessionId: sid });
+      if (activeSessionRef.current === sid) {
+        releaseWebSocketClient(sid);
+        activeSessionRef.current = null;
+        clientRef.current = null;
+      }
     };
   }, [sessionId, token, user?.id, autoConnect]);
 
@@ -74,11 +92,15 @@ export function useRealtimeWebsocket(options: UseRealtimeWebsocketOptions = {}) 
   }, []);
 
   const disconnect = useCallback(() => {
-    clientRef.current?.disconnect();
+    if (activeSessionRef.current) {
+      releaseWebSocketClient(activeSessionRef.current);
+      activeSessionRef.current = null;
+      clientRef.current = null;
+    }
   }, []);
 
   return {
-    sessionId,
+    sessionId: sessionId ?? "",
     videoId,
     connectionStatus,
     lastPingMs,

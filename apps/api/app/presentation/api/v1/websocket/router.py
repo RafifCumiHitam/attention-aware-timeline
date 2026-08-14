@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
+from starlette.websockets import WebSocketState
 
 from app.core.logging import get_logger
 from app.core.security import decode_token
@@ -33,19 +34,11 @@ def evaluate_adaptive_playback(
     seek_delta_seconds: float | None = None,
     is_difficult_section: bool = False,
 ) -> AdaptivePlaybackCommandMessage:
-    """
-    Heuristic adaptive engine (baseline — no DL emotion model).
-
-    Target behavior:
-    If the learner seeks forward into a difficult section while attention is low,
-    reduce playback speed to 0.8x.
-    """
     emotion_clean = (current_emotion or "neutral").lower().strip()
     is_seek_forward = (event_type or "").upper() == "SEEK_FORWARD" or (
         seek_delta_seconds is not None and seek_delta_seconds > 0
     )
 
-    # Primary thesis rule: seek-forward + difficult + low attention → 0.8x
     if is_seek_forward and is_difficult_section and attention_score < 0.55:
         return AdaptivePlaybackCommandMessage(
             session_id=session_id,
@@ -58,7 +51,6 @@ def evaluate_adaptive_playback(
             target_timestamp=progress_seconds,
         )
 
-    # Low attention or confused/distracted → slowdown (0.8x baseline)
     if attention_score < 0.40 or emotion_clean in ("confused", "distracted"):
         return AdaptivePlaybackCommandMessage(
             session_id=session_id,
@@ -108,10 +100,15 @@ async def websocket_learning_endpoint(
     user_id: str = Query(default="demo-user-1"),
     token: str | None = Query(default=None),
 ) -> None:
-    """
-    WebSocket endpoint for realtime video progress, attention score,
-    and adaptive playback control. All messages are session-scoped.
-    """
+    """Realtime video progress + attention + adaptive playback (session-scoped)."""
+    logger.info(
+        "websocket_request",
+        session_id=session_id,
+        user_id=user_id,
+        has_token=bool(token),
+        client=str(websocket.client),
+    )
+
     actual_user_id = user_id
 
     if token:
@@ -119,23 +116,38 @@ async def websocket_learning_endpoint(
             payload = decode_token(token)
             if payload.get("sub"):
                 actual_user_id = str(payload.get("sub"))
+                logger.info("websocket_auth_ok", user_id=actual_user_id)
         except Exception as exc:
             logger.warning(
                 "websocket_auth_warning",
                 error=str(exc),
-                message="Proceeding with guest session ID",
+                message="Proceeding with query user_id",
             )
 
     await manager.connect(websocket, session_id=session_id, user_id=actual_user_id)
+    logger.info(
+        "websocket_accepted_waiting_messages",
+        session_id=session_id,
+        user_id=actual_user_id,
+    )
 
     try:
         while True:
+            if websocket.client_state != WebSocketState.CONNECTED:
+                logger.info(
+                    "websocket_client_state_not_connected",
+                    state=str(websocket.client_state),
+                    session_id=session_id,
+                )
+                break
+
             raw_data = await websocket.receive_json()
 
             if not isinstance(raw_data, dict):
                 continue
 
             msg_type = raw_data.get("type")
+            logger.debug("websocket_message", type=msg_type, session_id=session_id)
 
             if msg_type == "ping":
                 timestamp = raw_data.get("timestamp", time.time())
@@ -158,7 +170,6 @@ async def websocket_learning_endpoint(
                     )
                     continue
 
-                # Enforce session binding: prefer connection session_id
                 bound_session = session_id or telemetry.session_id
 
                 adaptation = evaluate_adaptive_playback(
@@ -216,8 +227,20 @@ async def websocket_learning_endpoint(
             else:
                 logger.debug("websocket_unknown_type", type=msg_type)
 
-    except WebSocketDisconnect:
+    except WebSocketDisconnect as e:
+        logger.info(
+            "websocket_disconnect",
+            session_id=session_id,
+            user_id=actual_user_id,
+            code=getattr(e, "code", None),
+            reason="client_or_network",
+        )
         await manager.disconnect(websocket, session_id=session_id, user_id=actual_user_id)
     except Exception as exc:
-        logger.error("websocket_unexpected_error", error=str(exc))
+        logger.error(
+            "websocket_unexpected_error",
+            error=str(exc),
+            session_id=session_id,
+            user_id=actual_user_id,
+        )
         await manager.disconnect(websocket, session_id=session_id, user_id=actual_user_id)
