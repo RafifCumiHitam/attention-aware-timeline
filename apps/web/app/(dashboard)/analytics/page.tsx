@@ -1,5 +1,6 @@
 "use client";
 
+import { useMemo } from "react";
 import {
   Clock,
   Eye,
@@ -24,7 +25,9 @@ import {
   CompletionRateChart,
   DailyActivityChart,
   AttentionChart,
+  DifficultyTimelineChart,
   useAnalyticsData,
+  useDifficultyTimeline,
 } from "@/features/analytics";
 
 function EmptyState({ onRefresh }: { onRefresh: () => void }) {
@@ -84,6 +87,16 @@ export default function AnalyticsPage() {
     refresh,
   } = useAnalyticsData({ trendDays: 7, bucketSeconds: 30 });
 
+  // Prefer first top video from overview (when analytics loaded)
+  // DEMO fallback matches Learn page placeholder UUID used in sessions
+  const difficultyVideoId = useMemo(() => {
+    return "00000000-0000-4000-8000-000000000101";
+  }, []);
+
+  const difficulty = useDifficultyTimeline(
+    state === "success" || state === "empty" ? difficultyVideoId : null
+  );
+
   if (state === "loading" || state === "idle") {
     return (
       <div className="space-y-6">
@@ -118,6 +131,11 @@ export default function AnalyticsPage() {
   const peakSeeks =
     seekHeatmap.length > 0 ? Math.max(...seekHeatmap.map((s) => s.seeks), 0) : 0;
 
+  const peakDifficulty =
+    difficulty.bins.length > 0
+      ? Math.max(...difficulty.bins.map((b) => b.difficulty))
+      : 0;
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -125,7 +143,16 @@ export default function AnalyticsPage() {
           title="Learning Analytics"
           description="Watch time, attention, seeks, speed, pauses — from real interaction events"
         />
-        <Button type="button" variant="outline" size="sm" className="gap-2" onClick={refresh}>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="gap-2"
+          onClick={() => {
+            refresh();
+            difficulty.refresh();
+          }}
+        >
           <RefreshCw className="h-3.5 w-3.5" /> Refresh
         </Button>
       </div>
@@ -161,6 +188,7 @@ export default function AnalyticsPage() {
         <TabsList className="flex h-auto w-full flex-wrap justify-start gap-1 sm:w-auto">
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="engagement">Engagement</TabsTrigger>
+          <TabsTrigger value="difficulty">Difficulty</TabsTrigger>
           <TabsTrigger value="attention">Attention</TabsTrigger>
           <TabsTrigger value="completion">Completion</TabsTrigger>
         </TabsList>
@@ -242,6 +270,52 @@ export default function AnalyticsPage() {
           </div>
         </TabsContent>
 
+        <TabsContent value="difficulty" className="space-y-4">
+          <div className="grid gap-4 sm:grid-cols-3">
+            <StatCard
+              title="Peak Difficulty"
+              value={peakDifficulty.toFixed(2)}
+              trendLabel="Behavioral Score [0–1]"
+              icon={Activity}
+            />
+            <StatCard
+              title="Buckets"
+              value={String(difficulty.bins.length)}
+              trendLabel={`${difficulty.meta?.bucket_seconds ?? 10}s intervals`}
+              icon={Clock}
+            />
+            <StatCard
+              title="Source Events"
+              value={String(difficulty.meta?.event_count ?? 0)}
+              trendLabel="pause / seek / play"
+              icon={Activity}
+            />
+          </div>
+
+          <ChartCard
+            title={difficulty.meta?.label ?? "Behavioral Difficulty Score"}
+            description={
+              difficulty.meta?.disclaimer ??
+              "Heuristic from pause, seek, replay, and revisit density — not scientifically validated"
+            }
+          >
+            {difficulty.state === "loading" ? (
+              <div className="h-[280px] animate-pulse rounded-md bg-muted" />
+            ) : difficulty.state === "error" ? (
+              <p className="py-8 text-center text-sm text-destructive">
+                {difficulty.error ?? "Failed to load difficulty timeline"}
+              </p>
+            ) : (
+              <DifficultyTimelineChart data={difficulty.bins} />
+            )}
+          </ChartCard>
+
+          <p className="text-xs text-muted-foreground">
+            Score weights: pause 0.20 · seek 0.20 · backward seek 0.20 · replay 0.15 · revisit 0.15 ·
+            seek distance 0.10. Aligned to video timeline buckets (default 10s).
+          </p>
+        </TabsContent>
+
         <TabsContent value="attention" className="space-y-4">
           <div className="grid gap-4 lg:grid-cols-5">
             <ChartCard
@@ -255,7 +329,11 @@ export default function AnalyticsPage() {
                 <AttentionChart data={attentionTrend} />
               )}
             </ChartCard>
-            <ChartCard title="Daily Attention" description="Average attention by day" className="lg:col-span-2">
+            <ChartCard
+              title="Daily Attention"
+              description="Average attention by day"
+              className="lg:col-span-2"
+            >
               {dailyActivity.length === 0 ? (
                 <p className="py-8 text-center text-sm text-muted-foreground">No daily data</p>
               ) : (

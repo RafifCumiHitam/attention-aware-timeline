@@ -7,3 +7,5 @@ export { PauseFrequencyChart } from "./pause-frequency-chart";
 export { CompletionRateChart } from "./completion-rate-chart";
 export { DailyActivityChart } from "./daily-activity-chart";
 export { AttentionChart } from "./attention-chart";
+export { DifficultyTimelineChart } from "./difficulty-timeline-chart";
+export type { DifficultyBin } from "./difficulty-timeline-chart";
