@@ -37,6 +37,7 @@ export function useFaceLandmarker(options: UseFaceLandmarkerOptions = {}) {
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Engine + worker created once — not tied to sessionId / attention score / unstable callbacks
   useEffect(() => {
     let cancelled = false;
     const engine = new FaceLandmarkerEngine({
@@ -63,7 +64,7 @@ export function useFaceLandmarker(options: UseFaceLandmarkerOptions = {}) {
         if (!cancelled) setReady(true);
       })
       .catch((e: Error) => {
-        if (!cancelled) setError(e.message || "Failed to init Face Landmarker");
+        if (!cancelled) setError(e.message || "Failed to init Face Landmarker worker");
       });
     return () => {
       cancelled = true;
@@ -93,7 +94,6 @@ export function useFaceLandmarker(options: UseFaceLandmarkerOptions = {}) {
       return;
     }
     try {
-      // Camera stays ~30fps for smooth preview; inference is independently throttled to ~10fps
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: false,
         video: {
@@ -118,7 +118,6 @@ export function useFaceLandmarker(options: UseFaceLandmarkerOptions = {}) {
           height: settings.height,
           frameRate: settings.frameRate,
           facingMode: settings.facingMode,
-          deviceId: settings.deviceId ? "(set)" : undefined,
           videoWidth: video.videoWidth,
           videoHeight: video.videoHeight,
         });

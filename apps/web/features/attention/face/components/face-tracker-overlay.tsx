@@ -1,8 +1,8 @@
 "use client";
 
 /**
- * Face tracker UI — inference ~10 FPS / 480px (never force 30 here).
- * Visibility: engine skips inference when tab hidden; camera stays open.
+ * Face tracker UI — inference ~10 FPS in Web Worker (Phase 12).
+ * Camera preview stays on main thread; detectForVideo never runs here.
  */
 
 import { useFaceLandmarker } from "../hooks/use-face-landmarker";
@@ -67,11 +67,11 @@ export function FaceTrackerOverlay({
             )}
           >
             {!ready
-              ? "Loading model…"
+              ? "Loading worker…"
               : streaming
                 ? DISABLE_FACE_INFERENCE
                   ? "Preview only (inference OFF)"
-                  : `Tracking ~${targetFps}fps`
+                  : `Worker ~${targetFps}fps`
                 : "Ready"}
           </span>
           {result?.face_detected && !DISABLE_FACE_INFERENCE && (

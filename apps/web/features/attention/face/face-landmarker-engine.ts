@@ -1,65 +1,19 @@
 /**
- * MediaPipe Face Landmarker — default ~10 FPS inference / 480px input.
+ * Main-thread Face Landmarker engine (Phase 12).
  *
- * Metrics (when NEXT_PUBLIC_PERF_DEBUG=true), aggregated every 5s:
- *   targetFps, actualInferenceFps, rAFHz, inferenceAvgMs, inferenceMaxMs,
- *   postProcessAvgMs, droppedBusy, inputWxH, cameraWxH
+ * - Camera / frame scheduling on main thread
+ * - detectForVideo() ONLY inside face-landmarker.worker.ts
+ * - ImageBitmap transfer + latest-frame-wins (no queue buildup)
+ * - UI callbacks throttled by consumers; this engine does not set React state
  */
+
 import { DEFAULT_MODEL_URL, DEFAULT_WASM_PATH } from "./constants";
-import { detectBlink } from "./modules/blink-detection";
-import { detectFace } from "./modules/face-detection";
-import { trackEyes } from "./modules/eye-tracking";
-import { estimateHeadPose } from "./modules/head-pose";
+import type { FaceLandmarkResult, FaceLandmarkerOptions } from "./types";
 import type {
-  FaceLandmarkResult,
-  FaceLandmarkerOptions,
-  LandmarkPoint,
-} from "./types";
+  MainToWorkerMessage,
+  WorkerToMainMessage,
+} from "./workers/worker-protocol";
 import { DISABLE_FACE_INFERENCE, PERF_DEBUG } from "@/lib/perf-flags";
-
-type MpFaceLandmarker = {
-  detectForVideo: (
-    input: HTMLVideoElement | HTMLCanvasElement,
-    timestampMs: number
-  ) => { faceLandmarks?: Array<Array<{ x: number; y: number; z: number }>> };
-  close: () => void;
-};
-
-type MpVisionModule = {
-  FilesetResolver: {
-    forVisionTasks: (wasmPath: string) => Promise<unknown>;
-  };
-  FaceLandmarker: {
-    createFromOptions: (
-      vision: unknown,
-      options: Record<string, unknown>
-    ) => Promise<MpFaceLandmarker>;
-  };
-};
-
-const MEDIAPIPE_ESM =
-  "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/+esm";
-
-let visionModulePromise: Promise<MpVisionModule> | null = null;
-
-function runtimeImport(specifier: string): Promise<MpVisionModule> {
-  // eslint-disable-next-line @typescript-eslint/no-implied-eval, no-new-func
-  const importer = new Function(
-    "s",
-    "return import(s)"
-  ) as (s: string) => Promise<MpVisionModule>;
-  return importer(specifier);
-}
-
-function loadVisionModule(): Promise<MpVisionModule> {
-  if (typeof window === "undefined") {
-    return Promise.reject(new Error("FaceLandmarker only runs in the browser"));
-  }
-  if (!visionModulePromise) {
-    visionModulePromise = runtimeImport(MEDIAPIPE_ESM);
-  }
-  return visionModulePromise;
-}
 
 function emptyResult(timestamp: number): FaceLandmarkResult {
   return {
@@ -75,14 +29,7 @@ function emptyResult(timestamp: number): FaceLandmarkResult {
   };
 }
 
-function toPoints(
-  raw: Array<{ x: number; y: number; z: number }>
-): LandmarkPoint[] {
-  return raw.map((p) => ({ x: p.x, y: p.y, z: p.z }));
-}
-
 export class FaceLandmarkerEngine {
-  private landmarker: MpFaceLandmarker | null = null;
   private opts: Required<
     Pick<
       FaceLandmarkerOptions,
@@ -95,24 +42,31 @@ export class FaceLandmarkerEngine {
     >
   > &
     FaceLandmarkerOptions;
-  private running = false;
-  private busy = false;
-  private rafId: number | null = null;
-  private lastTs = 0;
-  private lastEmit = 0;
-  private frameInterval: number;
-  private closedFrames = 0;
-  private video: HTMLVideoElement | null = null;
-  private canvas: HTMLCanvasElement | null = null;
-  private ctx: CanvasRenderingContext2D | null = null;
 
-  // --- profiling windows ---
-  private inferDurations: number[] = [];
-  private postDurations: number[] = [];
-  private inferCount = 0;
-  private rafCount = 0;
-  private droppedBusy = 0;
-  private droppedHidden = 0;
+  private worker: Worker | null = null;
+  private workerReady = false;
+  private running = false;
+  private video: HTMLVideoElement | null = null;
+  private rafId: number | null = null;
+  private rvfcHandle: number | null = null;
+
+  private frameInterval: number;
+  private lastSubmitted = 0;
+  private frameId = 0;
+
+  /** Latest-frame-wins */
+  private workerBusy = false;
+  private pendingBitmap: ImageBitmap | null = null;
+  private pendingTimestamp = 0;
+  private pendingFrameId = 0;
+
+  // Perf aggregates
+  private submitted = 0;
+  private processed = 0;
+  private dropped = 0;
+  private inferMs: number[] = [];
+  private rttMs: number[] = [];
+  private submitTimes = new Map<number, number>();
   private lastPerfLog = 0;
   private lastInputW = 0;
   private lastInputH = 0;
@@ -133,72 +87,152 @@ export class FaceLandmarkerEngine {
 
   async init(): Promise<void> {
     if (DISABLE_FACE_INFERENCE) {
-      // Still create canvas path for preview-only mode; skip model load cost optional
-      this.canvas = document.createElement("canvas");
-      this.ctx = this.canvas.getContext("2d", { willReadFrequently: false });
+      this.workerReady = true;
       return;
     }
 
-    const { FilesetResolver, FaceLandmarker } = await loadVisionModule();
-
-    const create = async (delegate: "GPU" | "CPU") => {
-      const vision = await FilesetResolver.forVisionTasks(this.opts.wasmPath);
-      return FaceLandmarker.createFromOptions(vision, {
-        baseOptions: {
-          modelAssetPath: this.opts.modelAssetPath,
-          delegate,
-        },
-        runningMode: "VIDEO",
-        numFaces: 1,
-        outputFaceBlendshapes: false,
-        outputFacialTransformationMatrixes: false,
-        minFaceDetectionConfidence: this.opts.minDetectionConfidence,
-        minFacePresenceConfidence: this.opts.minDetectionConfidence,
-        minTrackingConfidence: this.opts.minTrackingConfidence,
-      });
-    };
-
-    try {
-      this.landmarker = await create("GPU");
-    } catch {
-      this.landmarker = await create("CPU");
+    if (typeof Worker === "undefined") {
+      throw new Error("Web Workers are not available in this environment");
     }
 
-    this.canvas = document.createElement("canvas");
-    this.ctx = this.canvas.getContext("2d", { willReadFrequently: false });
+    // Webpack / Next.js worker bundling
+    this.worker = new Worker(
+      new URL("./workers/face-landmarker.worker.ts", import.meta.url)
+    );
+
+    this.worker.onmessage = (ev: MessageEvent<WorkerToMainMessage>) => {
+      this.handleWorkerMessage(ev.data);
+    };
+    this.worker.onerror = (ev) => {
+      this.opts.onError?.(new Error(ev.message || "Face worker error"));
+    };
+
+    await new Promise<void>((resolve, reject) => {
+      if (!this.worker) {
+        reject(new Error("Worker failed to construct"));
+        return;
+      }
+
+      const timeout = setTimeout(() => {
+        reject(new Error("Face worker init timeout"));
+      }, 60000);
+
+      const onMsg = (ev: MessageEvent<WorkerToMainMessage>) => {
+        if (ev.data?.type === "READY") {
+          clearTimeout(timeout);
+          this.worker?.removeEventListener("message", onMsg);
+          this.workerReady = true;
+          resolve();
+        }
+        if (ev.data?.type === "ERROR" && ev.data.fatal) {
+          clearTimeout(timeout);
+          this.worker?.removeEventListener("message", onMsg);
+          reject(new Error(ev.data.message));
+        }
+      };
+
+      this.worker.addEventListener("message", onMsg);
+
+      const initMsg: MainToWorkerMessage = {
+        type: "INIT",
+        config: {
+          wasmPath: this.opts.wasmPath,
+          modelAssetPath: this.opts.modelAssetPath,
+          minDetectionConfidence: this.opts.minDetectionConfidence,
+          minTrackingConfidence: this.opts.minTrackingConfidence,
+        },
+      };
+      this.worker.postMessage(initMsg);
+    });
   }
 
   start(video: HTMLVideoElement): void {
-    if (!DISABLE_FACE_INFERENCE && !this.landmarker) {
+    if (!DISABLE_FACE_INFERENCE && !this.workerReady) {
       throw new Error("Call init() first");
     }
     this.video = video;
     this.running = true;
-    this.lastTs = 0;
-    this.lastEmit = 0;
+    this.lastSubmitted = 0;
     this.lastPerfLog = performance.now();
-    this.loop();
+    this.scheduleLoop();
   }
 
   stop(): void {
     this.running = false;
-    if (this.rafId != null) cancelAnimationFrame(this.rafId);
-    this.rafId = null;
+    if (this.rafId != null) {
+      cancelAnimationFrame(this.rafId);
+      this.rafId = null;
+    }
+    if (this.rvfcHandle != null && this.video) {
+      const v = this.video as HTMLVideoElement & {
+        cancelVideoFrameCallback?: (h: number) => void;
+      };
+      v.cancelVideoFrameCallback?.(this.rvfcHandle);
+      this.rvfcHandle = null;
+    }
+    this.clearPendingBitmap();
   }
 
   async close(): Promise<void> {
     this.stop();
-    this.landmarker?.close();
-    this.landmarker = null;
+    if (this.worker) {
+      try {
+        this.worker.postMessage({ type: "CLOSE" } satisfies MainToWorkerMessage);
+      } catch {
+        /* ignore */
+      }
+      this.worker.terminate();
+      this.worker = null;
+    }
+    this.workerReady = false;
   }
 
-  private loop = (): void => {
-    if (!this.running) return;
-    this.rafId = requestAnimationFrame(this.loop);
-    this.rafCount += 1;
+  /** @deprecated Main thread must not run detectForVideo — kept for API compatibility */
+  analyzeVideoFrame(
+    _video: HTMLVideoElement,
+    timestampMs: number
+  ): FaceLandmarkResult {
+    return emptyResult(timestampMs / 1000);
+  }
 
+  // ---------------------------------------------------------------------------
+
+  private scheduleLoop(): void {
+    const video = this.video;
+    if (!video || !this.running) return;
+
+    const hasRvfc =
+      typeof (video as HTMLVideoElement & {
+        requestVideoFrameCallback?: (cb: () => void) => number;
+      }).requestVideoFrameCallback === "function";
+
+    if (hasRvfc) {
+      const tick = () => {
+        if (!this.running) return;
+        void this.onFrameOpportunity();
+        const v = this.video as HTMLVideoElement & {
+          requestVideoFrameCallback: (cb: () => void) => number;
+        };
+        if (v) this.rvfcHandle = v.requestVideoFrameCallback(tick);
+      };
+      this.rvfcHandle = (
+        video as HTMLVideoElement & {
+          requestVideoFrameCallback: (cb: () => void) => number;
+        }
+      ).requestVideoFrameCallback(tick);
+    } else {
+      const tick = () => {
+        if (!this.running) return;
+        this.rafId = requestAnimationFrame(tick);
+        void this.onFrameOpportunity();
+      };
+      this.rafId = requestAnimationFrame(tick);
+    }
+  }
+
+  private async onFrameOpportunity(): Promise<void> {
+    if (!this.running) return;
     if (typeof document !== "undefined" && document.visibilityState === "hidden") {
-      this.droppedHidden += 1;
       return;
     }
 
@@ -206,171 +240,206 @@ export class FaceLandmarkerEngine {
     if (!video || video.readyState < 2) return;
 
     const now = performance.now();
+    if (now - this.lastSubmitted < this.frameInterval) return;
 
-    // Throttle to targetFps
-    if (now - this.lastEmit < this.frameInterval) return;
-
-    if (this.busy) {
-      this.droppedBusy += 1;
+    if (DISABLE_FACE_INFERENCE) {
+      this.lastSubmitted = now;
+      this.opts.onResult?.({
+        ...emptyResult(Date.now() / 1000),
+        fps: this.opts.targetFps,
+        latency_ms: 0,
+      });
       return;
     }
 
-    this.busy = true;
-    this.lastEmit = now;
+    if (!this.worker || !this.workerReady) return;
 
+    // Create downscaled ImageBitmap (prefer native resize)
+    let bitmap: ImageBitmap;
     try {
-      if (now <= this.lastTs) return;
-      this.lastTs = now;
+      bitmap = await this.captureBitmap(video);
+    } catch {
+      return;
+    }
 
-      if (DISABLE_FACE_INFERENCE) {
-        // Isolation test: no MediaPipe — emit neutral result so pipeline can still run
-        this.opts.onResult?.({
-          ...emptyResult(Date.now() / 1000),
-          fps: this.opts.targetFps,
-          latency_ms: 0,
-        });
-        this.inferCount += 1;
-        return;
+    this.lastSubmitted = now;
+    this.frameId += 1;
+    const frameId = this.frameId;
+    const timestampMs = now;
+
+    if (this.workerBusy) {
+      // Latest-frame-wins: drop previous pending
+      if (this.pendingBitmap) {
+        try {
+          this.pendingBitmap.close();
+        } catch {
+          /* ignore */
+        }
+        this.dropped += 1;
       }
-
-      const result = this.analyzeVideoFrame(video, now);
-      this.opts.onResult?.(result);
-    } catch (err) {
-      this.opts.onError?.(err instanceof Error ? err : new Error(String(err)));
-    } finally {
-      this.busy = false;
-      this.maybeLogPerf(now);
-    }
-  };
-
-  analyzeVideoFrame(
-    video: HTMLVideoElement,
-    timestampMs: number
-  ): FaceLandmarkResult {
-    if (!this.landmarker) return emptyResult(timestampMs / 1000);
-
-    const t0 = performance.now();
-    const input = this.maybeDownscale(video);
-    if (input instanceof HTMLCanvasElement) {
-      this.lastInputW = input.width;
-      this.lastInputH = input.height;
-    } else {
-      this.lastInputW = input.videoWidth;
-      this.lastInputH = input.videoHeight;
+      this.pendingBitmap = bitmap;
+      this.pendingTimestamp = timestampMs;
+      this.pendingFrameId = frameId;
+      return;
     }
 
-    const tInfer0 = performance.now();
-    const mp = this.landmarker.detectForVideo(input, timestampMs);
-    const inferMs = performance.now() - tInfer0;
-    this.inferDurations.push(inferMs);
-    this.inferCount += 1;
-
-    const tPost0 = performance.now();
-    const result = this.mapResult(mp, t0);
-    this.postDurations.push(performance.now() - tPost0);
-
-    return result;
+    this.sendBitmap(bitmap, timestampMs, frameId);
   }
 
-  private maybeLogPerf(now: number): void {
+  private async captureBitmap(video: HTMLVideoElement): Promise<ImageBitmap> {
+    const maxW = this.opts.maxWidth;
+    const vw = video.videoWidth || maxW;
+    const vh = video.videoHeight || Math.round(maxW * 0.75);
+
+    if (vw > maxW) {
+      const scale = maxW / vw;
+      const w = maxW;
+      const h = Math.max(1, Math.round(vh * scale));
+      this.lastInputW = w;
+      this.lastInputH = h;
+      try {
+        return await createImageBitmap(video, {
+          resizeWidth: w,
+          resizeHeight: h,
+          resizeQuality: "medium",
+        } as ImageBitmapOptions);
+      } catch {
+        // Fallback: draw to canvas then bitmap
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext("2d");
+        ctx?.drawImage(video, 0, 0, w, h);
+        return createImageBitmap(canvas);
+      }
+    }
+
+    this.lastInputW = vw;
+    this.lastInputH = vh;
+    return createImageBitmap(video);
+  }
+
+  private sendBitmap(
+    bitmap: ImageBitmap,
+    timestampMs: number,
+    frameId: number
+  ): void {
+    if (!this.worker) {
+      try {
+        bitmap.close();
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
+
+    this.workerBusy = true;
+    this.submitted += 1;
+    this.submitTimes.set(frameId, performance.now());
+
+    const msg: MainToWorkerMessage = {
+      type: "FRAME",
+      bitmap,
+      timestampMs,
+      frameId,
+    };
+    this.worker.postMessage(msg, [bitmap]);
+  }
+
+  private handleWorkerMessage(data: WorkerToMainMessage): void {
+    if (!data) return;
+
+    if (data.type === "RESULT") {
+      const submitAt = this.submitTimes.get(data.frameId);
+      if (submitAt != null) {
+        this.rttMs.push(performance.now() - submitAt);
+        this.submitTimes.delete(data.frameId);
+      }
+      this.inferMs.push(data.inferenceMs);
+      this.processed += 1;
+      this.lastInputW = data.inputWidth;
+      this.lastInputH = data.inputHeight;
+
+      const result: FaceLandmarkResult = {
+        ...data.result,
+        fps: this.opts.targetFps,
+      };
+      this.opts.onResult?.(result);
+
+      this.workerBusy = false;
+      this.flushPending();
+      this.maybeLogPerf();
+      return;
+    }
+
+    if (data.type === "ERROR") {
+      this.opts.onError?.(new Error(data.message));
+      this.workerBusy = false;
+      this.flushPending();
+      return;
+    }
+  }
+
+  private flushPending(): void {
+    if (!this.pendingBitmap || this.workerBusy) return;
+    const bmp = this.pendingBitmap;
+    const ts = this.pendingTimestamp;
+    const id = this.pendingFrameId;
+    this.pendingBitmap = null;
+    this.sendBitmap(bmp, ts, id);
+  }
+
+  private clearPendingBitmap(): void {
+    if (this.pendingBitmap) {
+      try {
+        this.pendingBitmap.close();
+      } catch {
+        /* ignore */
+      }
+      this.pendingBitmap = null;
+    }
+  }
+
+  private maybeLogPerf(): void {
     if (!PERF_DEBUG) return;
+    const now = performance.now();
     if (now - this.lastPerfLog < 5000) return;
 
-    const windowSec = (now - this.lastPerfLog) / 1000;
-    const avg = (arr: number[]) =>
-      arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
-    const max = (arr: number[]) => (arr.length ? Math.max(...arr) : 0);
-    const p95 = (arr: number[]) => {
-      if (!arr.length) return 0;
-      const s = [...arr].sort((a, b) => a - b);
+    const avg = (a: number[]) =>
+      a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0;
+    const max = (a: number[]) => (a.length ? Math.max(...a) : 0);
+    const p95 = (a: number[]) => {
+      if (!a.length) return 0;
+      const s = [...a].sort((x, y) => x - y);
       return s[Math.min(s.length - 1, Math.floor(s.length * 0.95))];
     };
 
+    const windowSec = (now - this.lastPerfLog) / 1000;
     const camW = this.video?.videoWidth ?? 0;
     const camH = this.video?.videoHeight ?? 0;
 
-    console.log("[PERF][FACE]", {
+    console.log("[PERF][FACE-WORKER]", {
       targetFps: this.opts.targetFps,
-      actualInferenceFps: Math.round((this.inferCount / windowSec) * 10) / 10,
-      rAFHz: Math.round((this.rafCount / windowSec) * 10) / 10,
-      inferenceAvgMs: Math.round(avg(this.inferDurations) * 10) / 10,
-      inferenceP95Ms: Math.round(p95(this.inferDurations) * 10) / 10,
-      inferenceMaxMs: Math.round(max(this.inferDurations) * 10) / 10,
-      postProcessAvgMs: Math.round(avg(this.postDurations) * 10) / 10,
-      droppedBusy: this.droppedBusy,
-      droppedHidden: this.droppedHidden,
+      submittedFrames: this.submitted,
+      processedFrames: this.processed,
+      droppedFrames: this.dropped,
+      processedFps: Math.round((this.processed / windowSec) * 10) / 10,
+      inferenceAvgMs: Math.round(avg(this.inferMs) * 10) / 10,
+      inferenceP95Ms: Math.round(p95(this.inferMs) * 10) / 10,
+      inferenceMaxMs: Math.round(max(this.inferMs) * 10) / 10,
+      workerRoundTripAvgMs: Math.round(avg(this.rttMs) * 10) / 10,
+      workerRoundTripP95Ms: Math.round(p95(this.rttMs) * 10) / 10,
+      queueDepth: this.pendingBitmap ? 1 : 0,
+      workerBusy: this.workerBusy,
       cameraResolution: `${camW}x${camH}`,
       inputResolution: `${this.lastInputW}x${this.lastInputH}`,
-      maxWidth: this.opts.maxWidth,
-      inferenceDisabled: DISABLE_FACE_INFERENCE,
     });
 
-    this.inferDurations = [];
-    this.postDurations = [];
-    this.inferCount = 0;
-    this.rafCount = 0;
-    this.droppedBusy = 0;
-    this.droppedHidden = 0;
+    this.submitted = 0;
+    this.processed = 0;
+    this.dropped = 0;
+    this.inferMs = [];
+    this.rttMs = [];
     this.lastPerfLog = now;
-  }
-
-  private maybeDownscale(
-    video: HTMLVideoElement
-  ): HTMLVideoElement | HTMLCanvasElement {
-    const maxW = this.opts.maxWidth;
-    if (video.videoWidth <= maxW || !this.canvas || !this.ctx) return video;
-    const scale = maxW / video.videoWidth;
-    const w = maxW;
-    const h = Math.round(video.videoHeight * scale);
-    if (this.canvas.width !== w || this.canvas.height !== h) {
-      this.canvas.width = w;
-      this.canvas.height = h;
-    }
-    this.ctx.drawImage(video, 0, 0, w, h);
-    return this.canvas;
-  }
-
-  private mapResult(
-    mp: { faceLandmarks?: Array<Array<{ x: number; y: number; z: number }>> },
-    t0: number
-  ): FaceLandmarkResult {
-    const timestamp = Date.now() / 1000;
-    const latency = performance.now() - t0;
-
-    if (!mp.faceLandmarks?.length) {
-      this.closedFrames = 0;
-      return {
-        ...emptyResult(timestamp),
-        latency_ms: Math.round(latency * 10) / 10,
-        fps: this.opts.targetFps,
-      };
-    }
-
-    // Intermediate landmark array is local — never stored in React state
-    const landmarks = toPoints(mp.faceLandmarks[0]);
-    const detection = detectFace(landmarks);
-    const eyes = trackEyes(landmarks);
-    const pose = estimateHeadPose(landmarks);
-    const blink = detectBlink(
-      eyes.leftEar,
-      eyes.rightEar,
-      undefined,
-      this.closedFrames
-    );
-    this.closedFrames = blink.closedFrames;
-
-    return {
-      gaze: eyes.gaze,
-      eye_open: eyes.eyeOpen,
-      yaw: pose.yaw,
-      pitch: pose.pitch,
-      roll: pose.roll,
-      timestamp,
-      face_detected: detection.faceDetected,
-      tracking_confidence: detection.confidence,
-      blink_detected: blink.blinkDetected,
-      latency_ms: Math.round(latency * 10) / 10,
-      fps: this.opts.targetFps,
-    };
   }
 }
