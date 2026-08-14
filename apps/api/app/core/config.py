@@ -49,7 +49,13 @@ class Settings(BaseSettings):
 
     redis_url: str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
 
-    # Pagination defaults
+    # YouTube Data API — server-side only. NEVER expose to frontend.
+    youtube_api_key: str = Field(default="", alias="YOUTUBE_API_KEY")
+    youtube_api_base: str = Field(
+        default="https://www.googleapis.com/youtube/v3", alias="YOUTUBE_API_BASE"
+    )
+    youtube_http_timeout: float = Field(default=12.0, alias="YOUTUBE_HTTP_TIMEOUT")
+
     default_page_size: int = 20
     max_page_size: int = 100
 

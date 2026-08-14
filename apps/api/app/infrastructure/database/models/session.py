@@ -12,21 +12,11 @@ from app.infrastructure.database.base import Base, TimestampMixin
 
 
 class SessionStatus(str, PyEnum):
-    """
-    Lifecycle:
-      START  → creates row with ACTIVE
-      ACTIVE → accepting events & telemetry
-      PAUSED → recoverable; events still allowed (resume path)
-      ENDED  → closed; no further writes
-      ABANDONED → closed variant (tab lost / timeout)
-    """
-
     ACTIVE = "active"
     PAUSED = "paused"
     ENDED = "ended"
     ABANDONED = "abandoned"
 
-    # Back-compat aliases used by older code paths
     IN_PROGRESS = "active"
     COMPLETED = "ended"
 
@@ -50,6 +40,13 @@ class LearningSession(Base, TimestampMixin):
     )
     video_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("videos.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # Optional module linkage (denormalized from video.module_id for analytics)
+    module_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("modules.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
     )
     status: Mapped[SessionStatus] = mapped_column(
         Enum(
@@ -75,6 +72,9 @@ class LearningSession(Base, TimestampMixin):
 
     user: Mapped["User"] = relationship("User", back_populates="sessions")  # noqa: F821
     video: Mapped["Video"] = relationship("Video", back_populates="sessions")  # noqa: F821
+    learning_module: Mapped["Module | None"] = relationship(  # noqa: F821
+        "Module", back_populates="sessions"
+    )
     events: Mapped[list["InteractionEvent"]] = relationship(  # noqa: F821
         "InteractionEvent", back_populates="session", cascade="all, delete-orphan"
     )
