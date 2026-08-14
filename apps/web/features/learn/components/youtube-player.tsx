@@ -1,15 +1,12 @@
 "use client";
 
 /**
- * YouTube IFrame Player adapter.
- *
- * CRITICAL: externalPlaybackRate must NOT emit SPEED_CHANGE (feedback loop):
- *   adaptive rate → setPlaybackRate → onPlaybackRateChange → SPEED_CHANGE
- *   → pipeline telemetry → adaptive command → setPlaybackRate → …
+ * YouTube IFrame Player — adaptive rate applied without SPEED_CHANGE feedback loop.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
+import { DISABLE_ADAPTIVE_PLAYBACK } from "@/lib/perf-flags";
 import type {
   VideoPlayerEventMeta,
   VideoPlayerEventPayload,
@@ -72,7 +69,6 @@ export function YouTubePlayer({
   const lastTimeRef = useRef(0);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const playingRef = useRef(false);
-  /** Rate applied by adaptive engine — suppress echo SPEED_CHANGE */
   const appliedExternalRateRef = useRef<number | null>(null);
   const lastKnownRateRef = useRef(1);
   const [ready, setReady] = useState(false);
@@ -114,9 +110,7 @@ export function YouTubePlayer({
           playsinline: 1,
         },
         events: {
-          onReady: () => {
-            setReady(true);
-          },
+          onReady: () => setReady(true),
           onStateChange: (e: { data: number }) => {
             if (e.data === 1) {
               playingRef.current = true;
@@ -134,7 +128,6 @@ export function YouTubePlayer({
           },
           onPlaybackRateChange: (e: { data: number }) => {
             const next = e.data;
-            // Ignore echo from our own adaptive setPlaybackRate
             if (
               appliedExternalRateRef.current != null &&
               Math.abs(next - appliedExternalRateRef.current) < 0.01
@@ -158,11 +151,8 @@ export function YouTubePlayer({
         const delta = t - prev;
 
         if (Math.abs(delta) >= 2.5) {
-          if (delta > 0) {
-            emit("SEEK_FORWARD", { from: prev, to: t, delta });
-          } else {
-            emit("SEEK_BACKWARD", { from: prev, to: t, delta: Math.abs(delta) });
-          }
+          if (delta > 0) emit("SEEK_FORWARD", { from: prev, to: t, delta });
+          else emit("SEEK_BACKWARD", { from: prev, to: t, delta: Math.abs(delta) });
         } else if (playingRef.current && Math.abs(delta) >= 0.5) {
           emit("TIME_UPDATE", {
             currentTime: t,
@@ -189,8 +179,8 @@ export function YouTubePlayer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [youtubeVideoId, pollIntervalMs]);
 
-  // Adaptive rate: apply only when value actually changes — never emit SPEED_CHANGE
   useEffect(() => {
+    if (DISABLE_ADAPTIVE_PLAYBACK) return;
     if (!ready || externalPlaybackRate == null) return;
     const p = playerRef.current;
     if (!p?.setPlaybackRate) return;

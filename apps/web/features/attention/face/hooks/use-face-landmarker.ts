@@ -3,11 +3,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { FaceLandmarkerEngine } from "../face-landmarker-engine";
 import type { FaceLandmarkResult, FaceLandmarkerOptions } from "../types";
+import { PERF_DEBUG } from "@/lib/perf-flags";
 
 export interface UseFaceLandmarkerOptions extends FaceLandmarkerOptions {
   autoStart?: boolean;
   facingMode?: "user" | "environment";
-  /** Throttle React state updates for UI (ms). Inference callback still fires. */
+  /** Throttle React state updates for UI (ms). Pipeline callback still fires. */
   uiUpdateIntervalMs?: number;
 }
 
@@ -17,7 +18,7 @@ export function useFaceLandmarker(options: UseFaceLandmarkerOptions = {}) {
     facingMode = "user",
     onResult,
     onError,
-    uiUpdateIntervalMs = 200,
+    uiUpdateIntervalMs = 250,
     ...engineOpts
   } = options;
 
@@ -27,6 +28,7 @@ export function useFaceLandmarker(options: UseFaceLandmarkerOptions = {}) {
   const onResultRef = useRef(onResult);
   const onErrorRef = useRef(onError);
   const lastUiUpdate = useRef(0);
+  const cameraLogged = useRef(false);
   onResultRef.current = onResult;
   onErrorRef.current = onError;
 
@@ -42,7 +44,6 @@ export function useFaceLandmarker(options: UseFaceLandmarkerOptions = {}) {
       maxWidth: engineOpts.maxWidth ?? 480,
       ...engineOpts,
       onResult: (r) => {
-        // Always forward to pipeline (ref) — throttle only React state for overlays
         onResultRef.current?.(r);
         const now = performance.now();
         if (now - lastUiUpdate.current >= uiUpdateIntervalMs) {
@@ -92,14 +93,14 @@ export function useFaceLandmarker(options: UseFaceLandmarkerOptions = {}) {
       return;
     }
     try {
+      // Camera stays ~30fps for smooth preview; inference is independently throttled to ~10fps
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: false,
         video: {
           facingMode,
-          width: { ideal: 640 },
-          height: { ideal: 480 },
-          // Camera can run 24–30 fps for smooth preview; inference is throttled separately
-          frameRate: { ideal: 24, max: 30 },
+          width: { ideal: 640, max: 1280 },
+          height: { ideal: 480, max: 720 },
+          frameRate: { ideal: 30, max: 30 },
         },
       });
       streamRef.current = stream;
@@ -107,6 +108,22 @@ export function useFaceLandmarker(options: UseFaceLandmarkerOptions = {}) {
       video.playsInline = true;
       video.muted = true;
       await video.play();
+
+      if (PERF_DEBUG && !cameraLogged.current) {
+        cameraLogged.current = true;
+        const track = stream.getVideoTracks()[0];
+        const settings = track?.getSettings?.() ?? {};
+        console.log("[PERF][CAMERA]", {
+          width: settings.width,
+          height: settings.height,
+          frameRate: settings.frameRate,
+          facingMode: settings.facingMode,
+          deviceId: settings.deviceId ? "(set)" : undefined,
+          videoWidth: video.videoWidth,
+          videoHeight: video.videoHeight,
+        });
+      }
+
       engineRef.current.start(video);
       setStreaming(true);
     } catch (e) {

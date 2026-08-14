@@ -1,14 +1,14 @@
 "use client";
 
 /**
- * Face tracker UI — inference defaults must stay at ~10 FPS / 480px.
- * Do NOT pass targetFps: 30 here (that undoes Phase 9 optimization).
+ * Face tracker UI — inference ~10 FPS / 480px (never force 30 here).
+ * Visibility: engine skips inference when tab hidden; camera stays open.
  */
 
-import { useEffect } from "react";
 import { useFaceLandmarker } from "../hooks/use-face-landmarker";
 import type { FaceLandmarkResult } from "../types";
 import { cn } from "@/lib/utils";
+import { DISABLE_FACE_INFERENCE } from "@/lib/perf-flags";
 
 interface FaceTrackerOverlayProps {
   className?: string;
@@ -16,7 +16,6 @@ interface FaceTrackerOverlayProps {
   autoStart?: boolean;
   showVideo?: boolean;
   showDebug?: boolean;
-  /** Override inference FPS (default 10). */
   targetFps?: number;
   maxWidth?: number;
 }
@@ -38,25 +37,6 @@ export function FaceTrackerOverlay({
       onResult,
       uiUpdateIntervalMs: 250,
     });
-
-  // Pause inference when tab is hidden — camera track stays, CPU drops
-  useEffect(() => {
-    if (!streaming) return;
-
-    const onVis = () => {
-      if (document.visibilityState === "hidden") {
-        stop();
-      }
-      // User must press Start again after return — safer than auto-restart camera policy
-    };
-
-    // Soft pause: stop engine loop only via stop() which also stops tracks.
-    // Prefer engine-level pause if we only stop inference — for now stop() is explicit.
-    // Use a lighter path: document visibility does not auto-stop camera to avoid
-    // permission friction; engine itself can check visibility in a future pass.
-    document.addEventListener("visibilitychange", onVis);
-    return () => document.removeEventListener("visibilitychange", onVis);
-  }, [streaming, stop]);
 
   return (
     <div
@@ -86,16 +66,24 @@ export function FaceTrackerOverlay({
                   : "bg-zinc-600"
             )}
           >
-            {!ready ? "Loading model…" : streaming ? "Tracking ~10fps" : "Ready"}
+            {!ready
+              ? "Loading model…"
+              : streaming
+                ? DISABLE_FACE_INFERENCE
+                  ? "Preview only (inference OFF)"
+                  : `Tracking ~${targetFps}fps`
+                : "Ready"}
           </span>
-          {result?.face_detected && (
+          {result?.face_detected && !DISABLE_FACE_INFERENCE && (
             <span className="text-white/80">
               gaze ({result.gaze.x.toFixed(2)}, {result.gaze.y.toFixed(2)}) · yaw{" "}
               {result.yaw.toFixed(0)}°
             </span>
           )}
-          {result?.fps != null && (
-            <span className="ml-auto tabular-nums text-white/60">{result.fps} FPS</span>
+          {result?.latency_ms != null && (
+            <span className="ml-auto tabular-nums text-white/60">
+              {result.latency_ms}ms
+            </span>
           )}
         </div>
         {showDebug && result && (
@@ -105,7 +93,6 @@ export function FaceTrackerOverlay({
                 gaze: result.gaze,
                 yaw: result.yaw,
                 pitch: result.pitch,
-                fps: result.fps,
                 latency_ms: result.latency_ms,
               },
               null,

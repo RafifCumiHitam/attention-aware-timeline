@@ -8,6 +8,7 @@ import {
   type TelemetryPayload,
   type WebSocketClient,
 } from "@/lib/websocket-client";
+import { DISABLE_LEARNING_WS } from "@/lib/perf-flags";
 
 export interface UseRealtimeWebsocketOptions {
   sessionId?: string | null;
@@ -35,14 +36,11 @@ export function useRealtimeWebsocket(options: UseRealtimeWebsocketOptions = {}) 
   const attentionHistory = useRealtimeStore((state) => state.attentionHistory);
 
   useEffect(() => {
-    if (!autoConnect) {
+    if (!autoConnect || DISABLE_LEARNING_WS) {
       return;
     }
 
     if (!isValidSessionId(sessionId)) {
-      console.log("[useRealtimeWebsocket] skip connect — session not ready", {
-        sessionId,
-      });
       return;
     }
 
@@ -57,7 +55,6 @@ export function useRealtimeWebsocket(options: UseRealtimeWebsocketOptions = {}) 
     activeSessionRef.current = sid;
 
     return () => {
-      console.log("[useRealtimeWebsocket] effect cleanup", { sessionId: sid });
       if (activeSessionRef.current === sid) {
         releaseWebSocketClient(sid);
         activeSessionRef.current = null;
@@ -68,6 +65,7 @@ export function useRealtimeWebsocket(options: UseRealtimeWebsocketOptions = {}) 
 
   const sendTelemetry = useCallback(
     (telemetry: Omit<TelemetryPayload, "videoId"> & { videoId?: string }) => {
+      if (DISABLE_LEARNING_WS) return;
       if (clientRef.current) {
         clientRef.current.sendTelemetry({
           videoId: telemetry.videoId ?? videoId,
@@ -88,6 +86,7 @@ export function useRealtimeWebsocket(options: UseRealtimeWebsocketOptions = {}) 
   );
 
   const connect = useCallback(() => {
+    if (DISABLE_LEARNING_WS) return;
     clientRef.current?.connect();
   }, []);
 
@@ -102,13 +101,13 @@ export function useRealtimeWebsocket(options: UseRealtimeWebsocketOptions = {}) 
   return {
     sessionId: sessionId ?? "",
     videoId,
-    connectionStatus,
+    connectionStatus: DISABLE_LEARNING_WS ? ("disconnected" as const) : connectionStatus,
     lastPingMs,
     progressSeconds,
     progressPercent,
     attentionScore,
     currentEmotion,
-    playbackRate,
+    playbackRate: DISABLE_LEARNING_WS ? 1 : playbackRate,
     adaptiveAction,
     adaptiveReason,
     attentionHistory,

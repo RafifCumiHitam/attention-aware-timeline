@@ -1,6 +1,9 @@
 /**
- * Browser MediaPipe Face Landmarker — default ~10 FPS / 480px.
- * Pauses inference when document.visibilityState === "hidden".
+ * MediaPipe Face Landmarker — default ~10 FPS inference / 480px input.
+ *
+ * Metrics (when NEXT_PUBLIC_PERF_DEBUG=true), aggregated every 5s:
+ *   targetFps, actualInferenceFps, rAFHz, inferenceAvgMs, inferenceMaxMs,
+ *   postProcessAvgMs, droppedBusy, inputWxH, cameraWxH
  */
 import { DEFAULT_MODEL_URL, DEFAULT_WASM_PATH } from "./constants";
 import { detectBlink } from "./modules/blink-detection";
@@ -12,6 +15,7 @@ import type {
   FaceLandmarkerOptions,
   LandmarkPoint,
 } from "./types";
+import { DISABLE_FACE_INFERENCE, PERF_DEBUG } from "@/lib/perf-flags";
 
 type MpFaceLandmarker = {
   detectForVideo: (
@@ -37,10 +41,6 @@ const MEDIAPIPE_ESM =
   "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/+esm";
 
 let visionModulePromise: Promise<MpVisionModule> | null = null;
-
-const PERF =
-  typeof process !== "undefined" &&
-  process.env.NEXT_PUBLIC_PERF_DEBUG === "true";
 
 function runtimeImport(specifier: string): Promise<MpVisionModule> {
   // eslint-disable-next-line @typescript-eslint/no-implied-eval, no-new-func
@@ -102,14 +102,20 @@ export class FaceLandmarkerEngine {
   private lastEmit = 0;
   private frameInterval: number;
   private closedFrames = 0;
-  private fpsWindow: number[] = [];
   private video: HTMLVideoElement | null = null;
   private canvas: HTMLCanvasElement | null = null;
   private ctx: CanvasRenderingContext2D | null = null;
 
-  // Aggregated perf (log every 5s when NEXT_PUBLIC_PERF_DEBUG=true)
-  private perfSamples: number[] = [];
+  // --- profiling windows ---
+  private inferDurations: number[] = [];
+  private postDurations: number[] = [];
+  private inferCount = 0;
+  private rafCount = 0;
+  private droppedBusy = 0;
+  private droppedHidden = 0;
   private lastPerfLog = 0;
+  private lastInputW = 0;
+  private lastInputH = 0;
 
   constructor(options: FaceLandmarkerOptions = {}) {
     this.opts = {
@@ -126,6 +132,13 @@ export class FaceLandmarkerEngine {
   }
 
   async init(): Promise<void> {
+    if (DISABLE_FACE_INFERENCE) {
+      // Still create canvas path for preview-only mode; skip model load cost optional
+      this.canvas = document.createElement("canvas");
+      this.ctx = this.canvas.getContext("2d", { willReadFrequently: false });
+      return;
+    }
+
     const { FilesetResolver, FaceLandmarker } = await loadVisionModule();
 
     const create = async (delegate: "GPU" | "CPU") => {
@@ -156,11 +169,14 @@ export class FaceLandmarkerEngine {
   }
 
   start(video: HTMLVideoElement): void {
-    if (!this.landmarker) throw new Error("Call init() first");
+    if (!DISABLE_FACE_INFERENCE && !this.landmarker) {
+      throw new Error("Call init() first");
+    }
     this.video = video;
     this.running = true;
     this.lastTs = 0;
     this.lastEmit = 0;
+    this.lastPerfLog = performance.now();
     this.loop();
   }
 
@@ -176,43 +192,127 @@ export class FaceLandmarkerEngine {
     this.landmarker = null;
   }
 
-  analyzeVideoFrame(
-    video: HTMLVideoElement,
-    timestampMs: number
-  ): FaceLandmarkResult {
-    if (!this.landmarker) return emptyResult(timestampMs / 1000);
-    const t0 = performance.now();
-    const input = this.maybeDownscale(video);
-    const mp = this.landmarker.detectForVideo(input, timestampMs);
-    return this.mapResult(mp, t0);
-  }
-
   private loop = (): void => {
     if (!this.running) return;
     this.rafId = requestAnimationFrame(this.loop);
+    this.rafCount += 1;
 
-    // Skip inference when tab is hidden — keeps session alive, frees main thread
     if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+      this.droppedHidden += 1;
       return;
     }
 
     const video = this.video;
     if (!video || video.readyState < 2) return;
+
     const now = performance.now();
-    if (now - this.lastEmit < this.frameInterval || this.busy) return;
+
+    // Throttle to targetFps
+    if (now - this.lastEmit < this.frameInterval) return;
+
+    if (this.busy) {
+      this.droppedBusy += 1;
+      return;
+    }
+
     this.busy = true;
     this.lastEmit = now;
+
     try {
       if (now <= this.lastTs) return;
       this.lastTs = now;
+
+      if (DISABLE_FACE_INFERENCE) {
+        // Isolation test: no MediaPipe — emit neutral result so pipeline can still run
+        this.opts.onResult?.({
+          ...emptyResult(Date.now() / 1000),
+          fps: this.opts.targetFps,
+          latency_ms: 0,
+        });
+        this.inferCount += 1;
+        return;
+      }
+
       const result = this.analyzeVideoFrame(video, now);
       this.opts.onResult?.(result);
     } catch (err) {
       this.opts.onError?.(err instanceof Error ? err : new Error(String(err)));
     } finally {
       this.busy = false;
+      this.maybeLogPerf(now);
     }
   };
+
+  analyzeVideoFrame(
+    video: HTMLVideoElement,
+    timestampMs: number
+  ): FaceLandmarkResult {
+    if (!this.landmarker) return emptyResult(timestampMs / 1000);
+
+    const t0 = performance.now();
+    const input = this.maybeDownscale(video);
+    if (input instanceof HTMLCanvasElement) {
+      this.lastInputW = input.width;
+      this.lastInputH = input.height;
+    } else {
+      this.lastInputW = input.videoWidth;
+      this.lastInputH = input.videoHeight;
+    }
+
+    const tInfer0 = performance.now();
+    const mp = this.landmarker.detectForVideo(input, timestampMs);
+    const inferMs = performance.now() - tInfer0;
+    this.inferDurations.push(inferMs);
+    this.inferCount += 1;
+
+    const tPost0 = performance.now();
+    const result = this.mapResult(mp, t0);
+    this.postDurations.push(performance.now() - tPost0);
+
+    return result;
+  }
+
+  private maybeLogPerf(now: number): void {
+    if (!PERF_DEBUG) return;
+    if (now - this.lastPerfLog < 5000) return;
+
+    const windowSec = (now - this.lastPerfLog) / 1000;
+    const avg = (arr: number[]) =>
+      arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
+    const max = (arr: number[]) => (arr.length ? Math.max(...arr) : 0);
+    const p95 = (arr: number[]) => {
+      if (!arr.length) return 0;
+      const s = [...arr].sort((a, b) => a - b);
+      return s[Math.min(s.length - 1, Math.floor(s.length * 0.95))];
+    };
+
+    const camW = this.video?.videoWidth ?? 0;
+    const camH = this.video?.videoHeight ?? 0;
+
+    console.log("[PERF][FACE]", {
+      targetFps: this.opts.targetFps,
+      actualInferenceFps: Math.round((this.inferCount / windowSec) * 10) / 10,
+      rAFHz: Math.round((this.rafCount / windowSec) * 10) / 10,
+      inferenceAvgMs: Math.round(avg(this.inferDurations) * 10) / 10,
+      inferenceP95Ms: Math.round(p95(this.inferDurations) * 10) / 10,
+      inferenceMaxMs: Math.round(max(this.inferDurations) * 10) / 10,
+      postProcessAvgMs: Math.round(avg(this.postDurations) * 10) / 10,
+      droppedBusy: this.droppedBusy,
+      droppedHidden: this.droppedHidden,
+      cameraResolution: `${camW}x${camH}`,
+      inputResolution: `${this.lastInputW}x${this.lastInputH}`,
+      maxWidth: this.opts.maxWidth,
+      inferenceDisabled: DISABLE_FACE_INFERENCE,
+    });
+
+    this.inferDurations = [];
+    this.postDurations = [];
+    this.inferCount = 0;
+    this.rafCount = 0;
+    this.droppedBusy = 0;
+    this.droppedHidden = 0;
+    this.lastPerfLog = now;
+  }
 
   private maybeDownscale(
     video: HTMLVideoElement
@@ -237,42 +337,16 @@ export class FaceLandmarkerEngine {
     const timestamp = Date.now() / 1000;
     const latency = performance.now() - t0;
 
-    if (PERF) {
-      this.perfSamples.push(latency);
-      const now = performance.now();
-      if (now - this.lastPerfLog >= 5000) {
-        const avg =
-          this.perfSamples.reduce((a, b) => a + b, 0) / (this.perfSamples.length || 1);
-        const max = Math.max(...this.perfSamples, 0);
-        console.log("[PERF][FACE]", {
-          fps: this.opts.targetFps,
-          avgInferenceMs: Math.round(avg * 10) / 10,
-          maxInferenceMs: Math.round(max * 10) / 10,
-          samples: this.perfSamples.length,
-          maxWidth: this.opts.maxWidth,
-        });
-        this.perfSamples = [];
-        this.lastPerfLog = now;
-      }
-    }
-
-    this.fpsWindow.push(performance.now());
-    if (this.fpsWindow.length > 30) this.fpsWindow.shift();
-    let fps = 0;
-    if (this.fpsWindow.length >= 2) {
-      const dt =
-        (this.fpsWindow[this.fpsWindow.length - 1] - this.fpsWindow[0]) /
-        (this.fpsWindow.length - 1);
-      fps = dt > 0 ? Math.round(1000 / dt) : 0;
-    }
     if (!mp.faceLandmarks?.length) {
       this.closedFrames = 0;
       return {
         ...emptyResult(timestamp),
         latency_ms: Math.round(latency * 10) / 10,
-        fps,
+        fps: this.opts.targetFps,
       };
     }
+
+    // Intermediate landmark array is local — never stored in React state
     const landmarks = toPoints(mp.faceLandmarks[0]);
     const detection = detectFace(landmarks);
     const eyes = trackEyes(landmarks);
@@ -284,6 +358,7 @@ export class FaceLandmarkerEngine {
       this.closedFrames
     );
     this.closedFrames = blink.closedFrames;
+
     return {
       gaze: eyes.gaze,
       eye_open: eyes.eyeOpen,
@@ -295,7 +370,7 @@ export class FaceLandmarkerEngine {
       tracking_confidence: detection.confidence,
       blink_detected: blink.blinkDetected,
       latency_ms: Math.round(latency * 10) / 10,
-      fps,
+      fps: this.opts.targetFps,
     };
   }
 }
