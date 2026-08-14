@@ -10,6 +10,7 @@ from app.infrastructure.database.models.session import SessionStatus
 
 class SessionCreate(BaseModel):
     video_id: UUID
+    module_id: UUID | None = None
 
 
 class SessionRecover(BaseModel):
@@ -33,6 +34,7 @@ class SessionResponse(BaseModel):
     id: UUID
     user_id: UUID
     video_id: UUID
+    module_id: UUID | None = None
     status: SessionStatus
     progress_seconds: int
     progress_percent: float
