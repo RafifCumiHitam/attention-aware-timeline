@@ -26,7 +26,7 @@ class SessionService:
     async def start(self, user: User, data: SessionCreate) -> LearningSession:
         """START → ACTIVE. Resume existing ACTIVE/PAUSED for same user+video."""
         video = await self.videos.get_by_id(data.video_id)
-        if not video or not video.is_published:
+        if not video or not video.is_published or not getattr(video, "is_active", True):
             raise NotFoundError("Video", data.video_id)
 
         existing = await self.sessions.get_active_for_user_video(user.id, data.video_id)
@@ -36,9 +36,12 @@ class SessionService:
                 return await self.sessions.update(existing)
             return existing
 
+        module_id = data.module_id or getattr(video, "module_id", None)
+
         learning_session = LearningSession(
             user_id=user.id,
             video_id=data.video_id,
+            module_id=module_id,
             status=SessionStatus.ACTIVE,
             started_at=datetime.now(timezone.utc),
         )
@@ -47,7 +50,6 @@ class SessionService:
     async def recover(
         self, user: User, session_id: UUID | None = None, video_id: UUID | None = None
     ) -> LearningSession:
-        """Browser reconnect / refresh — resume PAUSED or return ACTIVE session."""
         if session_id:
             s = await self.get_by_id(session_id, user)
             if s.status in SessionStatus.closed():
@@ -94,8 +96,6 @@ class SessionService:
             return s
         s.status = SessionStatus.ABANDONED if abandoned else SessionStatus.ENDED
         s.ended_at = datetime.now(timezone.utc)
-        if s.status == SessionStatus.ENDED and s.progress_percent < 100:
-            pass  # keep actual progress
         return await self.sessions.update(s)
 
     async def get_by_id(self, session_id: UUID, user: User) -> LearningSession:
@@ -144,7 +144,6 @@ class SessionService:
         )
 
     async def timeline(self, session_id: UUID, user: User) -> list:
-        """Reconstruct ordered session events by video_timestamp then client_timestamp."""
         await self.get_by_id(session_id, user)
         events = await self.events.list_by_session_ordered(session_id)
         return events

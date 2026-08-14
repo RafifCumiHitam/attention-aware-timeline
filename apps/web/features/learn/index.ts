@@ -1,4 +1,6 @@
 export { VideoPlayer, VideoControls, VideoTimeline } from "./components";
+export { YouTubePlayer } from "./components/youtube-player";
+export { DifficultyOverlay } from "./components/difficulty-overlay";
 export { useVideoPlayer } from "./hooks/use-video-player";
 export { useEventLogger } from "./hooks/use-event-logger";
 export {

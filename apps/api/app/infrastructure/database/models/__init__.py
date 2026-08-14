@@ -1,7 +1,8 @@
 """Import all models so Alembic and Base.metadata discover them."""
 
 from app.infrastructure.database.models.user import User
-from app.infrastructure.database.models.video import Video
+from app.infrastructure.database.models.module import Module
+from app.infrastructure.database.models.video import Video, VideoSourceType
 from app.infrastructure.database.models.session import LearningSession, SessionStatus
 from app.infrastructure.database.models.event import InteractionEvent, EventType
 from app.infrastructure.database.models.transcript import VideoTranscript
@@ -12,7 +13,9 @@ from app.infrastructure.database.models.cache import SummaryCache, ResourceType
 
 __all__ = [
     "User",
+    "Module",
     "Video",
+    "VideoSourceType",
     "LearningSession",
     "SessionStatus",
     "InteractionEvent",
