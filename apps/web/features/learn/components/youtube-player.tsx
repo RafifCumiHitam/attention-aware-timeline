@@ -1,8 +1,11 @@
 "use client";
 
 /**
- * YouTube IFrame Player adapter — maps YT API → generic player events.
- * Poll interval 1000ms (was 500ms) — SEEK still detected at ≥2.5s jumps.
+ * YouTube IFrame Player adapter.
+ *
+ * CRITICAL: externalPlaybackRate must NOT emit SPEED_CHANGE (feedback loop):
+ *   adaptive rate → setPlaybackRate → onPlaybackRateChange → SPEED_CHANGE
+ *   → pipeline telemetry → adaptive command → setPlaybackRate → …
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -32,7 +35,6 @@ export interface YouTubePlayerProps {
     meta: VideoPlayerEventMeta
   ) => void;
   onVideoEnd?: () => void;
-  /** Poll currentTime interval (ms). Default 1000. */
   pollIntervalMs?: number;
 }
 
@@ -70,6 +72,9 @@ export function YouTubePlayer({
   const lastTimeRef = useRef(0);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const playingRef = useRef(false);
+  /** Rate applied by adaptive engine — suppress echo SPEED_CHANGE */
+  const appliedExternalRateRef = useRef<number | null>(null);
+  const lastKnownRateRef = useRef(1);
   const [ready, setReady] = useState(false);
 
   const emit = useCallback(
@@ -111,16 +116,8 @@ export function YouTubePlayer({
         events: {
           onReady: () => {
             setReady(true);
-            if (externalPlaybackRate && playerRef.current?.setPlaybackRate) {
-              try {
-                playerRef.current.setPlaybackRate(externalPlaybackRate);
-              } catch {
-                /* ignore */
-              }
-            }
           },
           onStateChange: (e: { data: number }) => {
-            // YT.PlayerState: PLAYING=1 PAUSED=2 ENDED=0 BUFFERING=3
             if (e.data === 1) {
               playingRef.current = true;
               emit("PLAY", {});
@@ -136,7 +133,18 @@ export function YouTubePlayer({
             }
           },
           onPlaybackRateChange: (e: { data: number }) => {
-            emit("SPEED_CHANGE", { to: e.data });
+            const next = e.data;
+            // Ignore echo from our own adaptive setPlaybackRate
+            if (
+              appliedExternalRateRef.current != null &&
+              Math.abs(next - appliedExternalRateRef.current) < 0.01
+            ) {
+              lastKnownRateRef.current = next;
+              return;
+            }
+            if (Math.abs(next - lastKnownRateRef.current) < 0.01) return;
+            lastKnownRateRef.current = next;
+            emit("SPEED_CHANGE", { to: next });
           },
         },
       });
@@ -144,7 +152,6 @@ export function YouTubePlayer({
       pollRef.current = setInterval(() => {
         const p = playerRef.current;
         if (!p?.getCurrentTime) return;
-        // Skip TIME_UPDATE work while paused — still detect seeks if user scrubs
         const t = p.getCurrentTime();
         const duration = p.getDuration?.() ?? 0;
         const prev = lastTimeRef.current;
@@ -182,15 +189,23 @@ export function YouTubePlayer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [youtubeVideoId, pollIntervalMs]);
 
+  // Adaptive rate: apply only when value actually changes — never emit SPEED_CHANGE
   useEffect(() => {
     if (!ready || externalPlaybackRate == null) return;
+    const p = playerRef.current;
+    if (!p?.setPlaybackRate) return;
+
+    const current = p.getPlaybackRate?.() ?? lastKnownRateRef.current;
+    if (Math.abs(current - externalPlaybackRate) < 0.01) return;
+
     try {
-      playerRef.current?.setPlaybackRate?.(externalPlaybackRate);
-      emit("SPEED_CHANGE", { to: externalPlaybackRate });
+      appliedExternalRateRef.current = externalPlaybackRate;
+      p.setPlaybackRate(externalPlaybackRate);
+      lastKnownRateRef.current = externalPlaybackRate;
     } catch {
-      /* ignore */
+      appliedExternalRateRef.current = null;
     }
-  }, [externalPlaybackRate, ready, emit]);
+  }, [externalPlaybackRate, ready]);
 
   return (
     <div className={cn("relative aspect-video w-full overflow-hidden rounded-xl bg-black", className)}>

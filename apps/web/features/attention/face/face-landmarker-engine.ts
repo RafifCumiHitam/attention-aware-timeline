@@ -1,6 +1,6 @@
 /**
- * Browser MediaPipe Face Landmarker.
- * Default ~10 FPS inference (not 30) — keeps camera preview smooth while cutting CPU.
+ * Browser MediaPipe Face Landmarker — default ~10 FPS / 480px.
+ * Pauses inference when document.visibilityState === "hidden".
  */
 import { DEFAULT_MODEL_URL, DEFAULT_WASM_PATH } from "./constants";
 import { detectBlink } from "./modules/blink-detection";
@@ -37,6 +37,10 @@ const MEDIAPIPE_ESM =
   "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/+esm";
 
 let visionModulePromise: Promise<MpVisionModule> | null = null;
+
+const PERF =
+  typeof process !== "undefined" &&
+  process.env.NEXT_PUBLIC_PERF_DEBUG === "true";
 
 function runtimeImport(specifier: string): Promise<MpVisionModule> {
   // eslint-disable-next-line @typescript-eslint/no-implied-eval, no-new-func
@@ -103,9 +107,12 @@ export class FaceLandmarkerEngine {
   private canvas: HTMLCanvasElement | null = null;
   private ctx: CanvasRenderingContext2D | null = null;
 
+  // Aggregated perf (log every 5s when NEXT_PUBLIC_PERF_DEBUG=true)
+  private perfSamples: number[] = [];
+  private lastPerfLog = 0;
+
   constructor(options: FaceLandmarkerOptions = {}) {
     this.opts = {
-      // Attention heuristics do not need 30 FPS inference on a laptop.
       targetFps: options.targetFps ?? 10,
       maxWidth: options.maxWidth ?? 480,
       wasmPath: options.wasmPath ?? DEFAULT_WASM_PATH,
@@ -183,6 +190,12 @@ export class FaceLandmarkerEngine {
   private loop = (): void => {
     if (!this.running) return;
     this.rafId = requestAnimationFrame(this.loop);
+
+    // Skip inference when tab is hidden — keeps session alive, frees main thread
+    if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+      return;
+    }
+
     const video = this.video;
     if (!video || video.readyState < 2) return;
     const now = performance.now();
@@ -223,6 +236,26 @@ export class FaceLandmarkerEngine {
   ): FaceLandmarkResult {
     const timestamp = Date.now() / 1000;
     const latency = performance.now() - t0;
+
+    if (PERF) {
+      this.perfSamples.push(latency);
+      const now = performance.now();
+      if (now - this.lastPerfLog >= 5000) {
+        const avg =
+          this.perfSamples.reduce((a, b) => a + b, 0) / (this.perfSamples.length || 1);
+        const max = Math.max(...this.perfSamples, 0);
+        console.log("[PERF][FACE]", {
+          fps: this.opts.targetFps,
+          avgInferenceMs: Math.round(avg * 10) / 10,
+          maxInferenceMs: Math.round(max * 10) / 10,
+          samples: this.perfSamples.length,
+          maxWidth: this.opts.maxWidth,
+        });
+        this.perfSamples = [];
+        this.lastPerfLog = now;
+      }
+    }
+
     this.fpsWindow.push(performance.now());
     if (this.fpsWindow.length > 30) this.fpsWindow.shift();
     let fps = 0;

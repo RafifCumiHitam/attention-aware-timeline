@@ -1,11 +1,11 @@
 "use client";
 
 /**
- * Learning watch page — internal video UUID + session_id + YouTube/HTML5 player.
- * youtube_video_id is ONLY the player source identifier.
+ * Watch page — single pipeline owner; panel autoConnect=false.
+ * handleEvent uses refs so YouTubePlayer does not rebind every attention tick.
  */
 
-import { useEffect, useMemo, useState, Suspense, useCallback } from "react";
+import { useEffect, useMemo, useState, Suspense, useCallback, useRef } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { Loader2, AlertCircle, LogIn } from "lucide-react";
 import { PageHeader } from "@/components/shared/page-header";
@@ -25,6 +25,11 @@ import { FaceTrackerLazy } from "@/features/attention";
 import { RealtimeLearningPanel } from "@/components/realtime/RealtimeLearningPanel";
 import { useSessionStore } from "@/stores/session-store";
 import { startLearningSession } from "@/features/modules/services/modules-api";
+import type {
+  VideoPlayerEventMeta,
+  VideoPlayerEventPayload,
+  VideoPlayerEventType,
+} from "@/features/learn/types/video-player";
 
 interface VideoDetail {
   id: string;
@@ -53,7 +58,6 @@ function WatchInner() {
   const [error, setError] = useState<string | null>(null);
   const [bootstrapping, setBootstrapping] = useState(true);
 
-  // Load video metadata (internal UUID)
   useEffect(() => {
     if (!videoId) {
       setBootstrapping(false);
@@ -73,7 +77,6 @@ function WatchInner() {
     };
   }, [videoId]);
 
-  // Ensure a real backend session exists before telemetry
   useEffect(() => {
     if (!videoId || !video) return;
     let cancelled = false;
@@ -90,17 +93,12 @@ function WatchInner() {
           return;
         }
 
-        // No session in URL — create/resume via API (never invent UUID)
         const s = await startLearningSession(videoId, video.module_id ?? undefined);
         if (cancelled) return;
         setSessionId(s.id);
         setSession({ sessionId: s.id, videoId: s.video_id, status: "active" });
         getEventService().setContext({ sessionId: s.id, videoId: s.video_id });
-        // Keep URL shareable
-        const q = new URLSearchParams({
-          videoId,
-          sessionId: s.id,
-        });
+        const q = new URLSearchParams({ videoId, sessionId: s.id });
         router.replace(`/learn/watch?${q.toString()}`);
       } catch (e) {
         if (!cancelled) setError(extractApiError(e, "Could not start learning session"));
@@ -126,22 +124,32 @@ function WatchInner() {
     getAttentionScore: () => pipeline.attentionScore,
   });
 
-  const isYouTube = useMemo(
-    () => video?.source_type === "youtube" || Boolean(video?.youtube_video_id),
-    [video]
-  );
+  // Stable handlers — avoid recreating YouTube onEvent every attention UI tick
+  const pipelineEventRef = useRef(pipeline.onPlayerEvent);
+  const loggerEventRef = useRef(onPlayerEvent);
+  pipelineEventRef.current = pipeline.onPlayerEvent;
+  loggerEventRef.current = onPlayerEvent;
+  const sessionIdRef = useRef(sessionId);
+  sessionIdRef.current = sessionId;
 
   const handleEvent = useCallback(
     (
-      type: Parameters<typeof pipeline.onPlayerEvent>[0],
-      payload: Parameters<typeof pipeline.onPlayerEvent>[1],
-      meta: Parameters<typeof pipeline.onPlayerEvent>[2]
+      type: VideoPlayerEventType,
+      payload: VideoPlayerEventPayload[VideoPlayerEventType],
+      meta: VideoPlayerEventMeta
     ) => {
-      if (!sessionId) return;
-      pipeline.onPlayerEvent(type, payload, meta);
-      onPlayerEvent(type, payload, meta);
+      if (!sessionIdRef.current) return;
+      pipelineEventRef.current(type, payload, meta);
+      loggerEventRef.current(type, payload, meta);
     },
-    [pipeline, onPlayerEvent, sessionId]
+    []
+  );
+
+  const adaptiveRate = pipeline.adaptivePlaybackRate;
+
+  const isYouTube = useMemo(
+    () => video?.source_type === "youtube" || Boolean(video?.youtube_video_id),
+    [video]
   );
 
   if (!videoId) {
@@ -200,8 +208,8 @@ function WatchInner() {
         <Badge variant={pipeline.connectionStatus === "connected" ? "default" : "secondary"}>
           WS {pipeline.connectionStatus}
         </Badge>
-        {pipeline.adaptivePlaybackRate !== 1 && (
-          <Badge variant="secondary">{pipeline.adaptivePlaybackRate}x adaptive</Badge>
+        {adaptiveRate !== 1 && (
+          <Badge variant="secondary">{adaptiveRate}x adaptive</Badge>
         )}
       </div>
 
@@ -211,7 +219,7 @@ function WatchInner() {
             <YouTubePlayer
               youtubeVideoId={video.youtube_video_id}
               title={video.title}
-              externalPlaybackRate={pipeline.adaptivePlaybackRate}
+              externalPlaybackRate={adaptiveRate}
               onEvent={handleEvent}
               onVideoEnd={() => void flush()}
             />
@@ -219,7 +227,7 @@ function WatchInner() {
             <VideoPlayer
               src={video.video_url}
               title={video.title}
-              externalPlaybackRate={pipeline.adaptivePlaybackRate}
+              externalPlaybackRate={adaptiveRate}
               onEvent={handleEvent}
               onVideoEnd={() => void flush()}
             />
