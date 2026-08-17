@@ -32,5 +32,12 @@ export type {
   InterventionState,
   ResearchEventMeta,
 } from "./clickstream";
+export {
+  ResumeOrchestrator,
+  resumeCommandFromContext,
+  Html5VideoController,
+  YouTubeVideoController,
+} from "./player";
+export type { VideoController, ResumeCommand, ResumeResult } from "./player";
 export type * from "./types/video-player";
 export type * from "./types/event-logger";

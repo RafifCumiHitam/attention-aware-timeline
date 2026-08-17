@@ -1,8 +1,7 @@
 "use client";
 
 /**
- * Watch page — pipeline + clickstream + intervention (Sprint 20).
- * VideoPlayer stays free of intervention rules.
+ * Watch page — pipeline + clickstream + intervention + VideoController resume (20.2).
  */
 
 import { useEffect, useMemo, useState, Suspense, useCallback, useRef } from "react";
@@ -22,6 +21,7 @@ import {
   useClickstream,
   useIntervention,
   InterventionBanner,
+  type VideoController,
 } from "@/features/learn";
 import { YouTubePlayer } from "@/features/learn/components/youtube-player";
 import { FaceTrackerLazy } from "@/features/attention";
@@ -63,6 +63,8 @@ function WatchInner() {
   const [sessionId, setSessionId] = useState(sessionIdParam || storeSessionId || "");
   const [error, setError] = useState<string | null>(null);
   const [bootstrapping, setBootstrapping] = useState(true);
+
+  const controllerRef = useRef<VideoController | null>(null);
 
   useEffect(() => {
     if (!videoId) {
@@ -137,6 +139,7 @@ function WatchInner() {
     moduleId: video?.module_id,
     experimentCondition,
     getAttentionScore: () => pipeline.attentionScore,
+    getVideoController: () => controllerRef.current,
     onLifecycleEvent: (type, ctx) => {
       log("CUSTOM", {
         currentTime: ctx.resumeTimestamp ?? 0,
@@ -160,7 +163,6 @@ function WatchInner() {
   const { onPlayerEvent: onClickstreamEvent, seekToResearchMeta } = useClickstream({
     getAdaptiveRate: () => pipeline.adaptivePlaybackRate,
     onFinalizedSeek: (seek: FinalizedSeekEvent) => {
-      // Derived research event (always log classification; counters only if meaningful)
       log(seek.type === "FORWARD_SEEK" ? "SEEK_FORWARD" : "SEEK_BACKWARD", {
         currentTime: seek.to,
         playbackSpeed: seek.playbackRate,
@@ -192,7 +194,6 @@ function WatchInner() {
     ) => {
       if (!sessionIdRef.current) return;
 
-      // SPEED_CHANGE: tag user vs adaptive in raw log path
       if (type === "SPEED_CHANGE") {
         const p = payload as VideoPlayerEventPayload["SPEED_CHANGE"];
         const adaptive = pipeline.adaptivePlaybackRate;
@@ -201,8 +202,6 @@ function WatchInner() {
             ? "adaptive"
             : "user";
         loggerEventRef.current(type, payload, meta);
-        // Re-log meta enrichment via service is already in onPlayerEvent;
-        // extra note for research:
         log("SPEED_CHANGE", {
           currentTime: meta.currentTime,
           playbackSpeed: meta.playbackRate,
@@ -219,11 +218,8 @@ function WatchInner() {
         return;
       }
 
-      // Seeks: raw path still logs immediately via logger; clickstream finalizes
       pipelineEventRef.current(type, payload, meta);
       if (type === "SEEK_FORWARD" || type === "SEEK_BACKWARD") {
-        // Defer meaningful classification to clickstream finalizer (debounce).
-        // Skip immediate raw logger duplicate storms — finalizer emits one event.
         clickstreamRef.current(type, payload, meta);
         return;
       }
@@ -232,6 +228,10 @@ function WatchInner() {
     },
     [log, pipeline.adaptivePlaybackRate]
   );
+
+  const onControllerReady = useCallback((c: VideoController | null) => {
+    controllerRef.current = c;
+  }, []);
 
   const adaptiveRate = pipeline.adaptivePlaybackRate;
 
@@ -302,6 +302,9 @@ function WatchInner() {
         {intervention.state !== "IDLE" && (
           <Badge variant="outline">ix: {intervention.state}</Badge>
         )}
+        {intervention.resumeAt != null && (
+          <Badge variant="outline">resume @{Math.round(intervention.resumeAt)}s</Badge>
+        )}
         {adaptiveRate !== 1 && (
           <Badge variant="secondary">{adaptiveRate}x adaptive</Badge>
         )}
@@ -310,8 +313,8 @@ function WatchInner() {
       <InterventionBanner
         showNotify={intervention.showNotify}
         showRemedial={intervention.showRemedial}
-        onComplete={intervention.completeRemedial}
-        onDismiss={intervention.dismissRemedial}
+        onComplete={() => void intervention.completeRemedial()}
+        onDismiss={() => void intervention.dismissRemedial()}
       />
 
       <div className="grid gap-4 lg:grid-cols-3">
@@ -319,18 +322,22 @@ function WatchInner() {
           {isYouTube && video.youtube_video_id ? (
             <YouTubePlayer
               youtubeVideoId={video.youtube_video_id}
+              videoId={video.id}
               title={video.title}
               externalPlaybackRate={adaptiveRate}
               onEvent={handleEvent}
               onVideoEnd={() => void flush()}
+              onControllerReady={onControllerReady}
             />
           ) : (
             <VideoPlayer
               src={video.video_url}
+              videoId={video.id}
               title={video.title}
               externalPlaybackRate={adaptiveRate}
               onEvent={handleEvent}
               onVideoEnd={() => void flush()}
+              onControllerReady={onControllerReady}
             />
           )}
 
