@@ -1,53 +1,61 @@
-# Project Status — Attention-Aware Timeline
+# Attention-Aware Timeline — STATUS
 
-**Last updated:** 2026-08-15  
-**Stage:** Advanced prototype / thesis MVP
+## Sprint 20 (research clickstream + intervention)
 
-## YouTube Module System (this sprint)
-
-| Area | Status |
-|------|--------|
-| Module ORM + API | Done |
-| Video.youtube_video_id vs internal video.id | Done |
-| YouTube Data API (server-side key) | Done |
-| Import video into module | Done |
-| Session.module_id | Done |
-| YouTube IFrame player adapter | Done |
-| Module UI + Start Learning → session | Done |
-| Attention pipeline source-agnostic | Done |
-
-### Identity rules
-
-- `video_id` = internal PostgreSQL UUID
-- `youtube_video_id` = YouTube string (player only)
-- `session_id` = learning session UUID from `POST /sessions`
-
-### Env
+### Architecture
 
 ```
-YOUTUBE_API_KEY=your_key_here   # API only — never NEXT_PUBLIC_
+VideoPlayer / YouTubePlayer
+    → normalized media events
+    → useClickstream (SeekFinalizer debounce ~300ms)
+    → meaningful seek classification (Δ ≥ 5s)
+    → InterventionEngine (zone pressure + low attention)
+    → InterventionBanner (notify 2s → remedial placeholder)
+    → EventService payload meta (raw vs derived)
+    → GET /api/v1/analytics/sessions/{id}/export?format=json|csv
 ```
 
-### Migration
+### Key rules
+
+- Seek drag → one finalized event after ~300ms idle
+- `seek_distance < 5s` → logged optionally as non-meaningful; **no** zone/intervention counters
+- Intervention requires: meaningful **backward** seek + behavioral pressure + low attention + not remedial + not cooldown
+- `CONTROL` condition (`?condition=CONTROL`) disables intervention; still logs events
+- Terms: `attention_low`, `meaningful_backward_seek`, `behavioral_pressure` — not “confusion”
+- SPEED_CHANGE tagged `user` vs `adaptive`
+
+### Files
+
+- `apps/web/features/learn/clickstream/*`
+- `apps/web/features/learn/components/intervention-banner.tsx`
+- `apps/web/app/(dashboard)/learn/watch/page.tsx`
+- `apps/api/app/presentation/api/v1/analytics/router.py` (export)
+
+### Tests
 
 ```bash
-cd apps/api && alembic upgrade head   # includes 20260815_0003_modules_youtube
+cd apps/web
+npx tsx features/learn/clickstream/__tests__/clickstream.test.ts
 ```
 
-### Key endpoints
+### Export
 
-- `GET/POST /api/v1/modules`
-- `GET /api/v1/modules/{id}/videos`
-- `POST /api/v1/modules/{id}/videos` `{ "youtube_video_id": "..." }`
-- `GET /api/v1/youtube/search?q=`
-- `POST /api/v1/sessions` `{ "video_id", "module_id?" }`
+```
+GET /api/v1/analytics/sessions/{session_id}/export?format=json
+GET /api/v1/analytics/sessions/{session_id}/export?format=csv
+```
 
-### Frontend routes
+Owner-only (403 for other users).
 
-- `/learn/modules` — list / create
-- `/learn/modules/[moduleId]` — videos + YouTube import
-- `/learn/watch?videoId=&sessionId=` — player + attention pipeline
+### Known limitations
 
-### Regression
+- Remedial content is a **development placeholder** (no LLM)
+- `experiment_condition` is URL/query driven; not yet a DB column on `learning_sessions`
+- HTML5 continuous `seeking` events may need extra wiring if player only emits jump seeks
+- Full automated e2e matrix not run in CI yet
+- Phase 12 MediaPipe worker remains independent of this sprint
 
-HTML5 MP4 Learn page still works. YouTube uses same `useAttentionPipeline` + event logger + WebSocket adaptive path.
+## Prior performance work
+
+- Phase 9–11: throttle REST/WS, fix FaceTracker 30fps override, SPEED_CHANGE loop
+- Phase 12: MediaPipe in Web Worker + ImageBitmap latest-frame-wins

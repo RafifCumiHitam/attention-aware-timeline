@@ -1,8 +1,8 @@
 "use client";
 
 /**
- * Watch page — single pipeline owner; panel autoConnect=false.
- * handleEvent uses refs so YouTubePlayer does not rebind every attention tick.
+ * Watch page — pipeline + clickstream + intervention (Sprint 20).
+ * VideoPlayer stays free of intervention rules.
  */
 
 import { useEffect, useMemo, useState, Suspense, useCallback, useRef } from "react";
@@ -19,6 +19,9 @@ import {
   useAttentionPipeline,
   useEventLogger,
   getEventService,
+  useClickstream,
+  useIntervention,
+  InterventionBanner,
 } from "@/features/learn";
 import { YouTubePlayer } from "@/features/learn/components/youtube-player";
 import { FaceTrackerLazy } from "@/features/attention";
@@ -30,6 +33,7 @@ import type {
   VideoPlayerEventPayload,
   VideoPlayerEventType,
 } from "@/features/learn/types/video-player";
+import type { FinalizedSeekEvent } from "@/features/learn/clickstream";
 
 interface VideoDetail {
   id: string;
@@ -49,6 +53,8 @@ function WatchInner() {
   const router = useRouter();
   const videoId = search.get("videoId") || "";
   const sessionIdParam = search.get("sessionId") || "";
+  const experimentCondition =
+    search.get("condition") === "CONTROL" ? "CONTROL" : "EXPERIMENTAL";
 
   const setSession = useSessionStore((s) => s.setSession);
   const storeSessionId = useSessionStore((s) => s.sessionId);
@@ -99,6 +105,7 @@ function WatchInner() {
         setSession({ sessionId: s.id, videoId: s.video_id, status: "active" });
         getEventService().setContext({ sessionId: s.id, videoId: s.video_id });
         const q = new URLSearchParams({ videoId, sessionId: s.id });
+        if (experimentCondition === "CONTROL") q.set("condition", "CONTROL");
         router.replace(`/learn/watch?${q.toString()}`);
       } catch (e) {
         if (!cancelled) setError(extractApiError(e, "Could not start learning session"));
@@ -120,15 +127,60 @@ function WatchInner() {
     autoConnect: Boolean(sessionId),
   });
 
-  const { onPlayerEvent, flush } = useEventLogger({
+  const { onPlayerEvent, flush, log } = useEventLogger({
     getAttentionScore: () => pipeline.attentionScore,
   });
 
-  // Stable handlers — avoid recreating YouTube onEvent every attention UI tick
+  const intervention = useIntervention({
+    sessionId,
+    videoId,
+    moduleId: video?.module_id,
+    experimentCondition,
+    getAttentionScore: () => pipeline.attentionScore,
+    onLifecycleEvent: (type, ctx) => {
+      log("CUSTOM", {
+        currentTime: ctx.resumeTimestamp ?? 0,
+        playbackSpeed: pipeline.adaptivePlaybackRate,
+        buffer: 0,
+        fullscreen: false,
+        meta: {
+          event_type_raw: type,
+          intervention_state: ctx.state,
+          target_zone_id: ctx.interventionZoneId,
+          resume_timestamp: ctx.resumeTimestamp,
+          experiment_condition: ctx.experimentCondition,
+          triggered_intervention: type === "INTERVENTION_TRIGGERED",
+          triggered_remedial: type === "REMEDIAL_OPENED",
+          raw_vs_derived: "derived",
+        },
+      });
+    },
+  });
+
+  const { onPlayerEvent: onClickstreamEvent, seekToResearchMeta } = useClickstream({
+    getAdaptiveRate: () => pipeline.adaptivePlaybackRate,
+    onFinalizedSeek: (seek: FinalizedSeekEvent) => {
+      // Derived research event (always log classification; counters only if meaningful)
+      log(seek.type === "FORWARD_SEEK" ? "SEEK_FORWARD" : "SEEK_BACKWARD", {
+        currentTime: seek.to,
+        playbackSpeed: seek.playbackRate,
+        buffer: 0,
+        fullscreen: false,
+        meta: {
+          ...seekToResearchMeta(seek),
+          experiment_condition: experimentCondition,
+        },
+      });
+      intervention.handleFinalizedSeek(seek);
+    },
+  });
+
   const pipelineEventRef = useRef(pipeline.onPlayerEvent);
   const loggerEventRef = useRef(onPlayerEvent);
+  const clickstreamRef = useRef(onClickstreamEvent);
   pipelineEventRef.current = pipeline.onPlayerEvent;
   loggerEventRef.current = onPlayerEvent;
+  clickstreamRef.current = onClickstreamEvent;
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
 
@@ -139,10 +191,46 @@ function WatchInner() {
       meta: VideoPlayerEventMeta
     ) => {
       if (!sessionIdRef.current) return;
+
+      // SPEED_CHANGE: tag user vs adaptive in raw log path
+      if (type === "SPEED_CHANGE") {
+        const p = payload as VideoPlayerEventPayload["SPEED_CHANGE"];
+        const adaptive = pipeline.adaptivePlaybackRate;
+        const source =
+          adaptive != null && Math.abs((p.to ?? meta.playbackRate) - adaptive) < 0.01
+            ? "adaptive"
+            : "user";
+        loggerEventRef.current(type, payload, meta);
+        // Re-log meta enrichment via service is already in onPlayerEvent;
+        // extra note for research:
+        log("SPEED_CHANGE", {
+          currentTime: meta.currentTime,
+          playbackSpeed: meta.playbackRate,
+          buffer: meta.buffer,
+          fullscreen: meta.fullscreen,
+          meta: {
+            from: p.from,
+            to: p.to,
+            speed_change_source: source,
+            raw_vs_derived: "raw",
+          },
+        });
+        pipelineEventRef.current(type, payload, meta);
+        return;
+      }
+
+      // Seeks: raw path still logs immediately via logger; clickstream finalizes
       pipelineEventRef.current(type, payload, meta);
+      if (type === "SEEK_FORWARD" || type === "SEEK_BACKWARD") {
+        // Defer meaningful classification to clickstream finalizer (debounce).
+        // Skip immediate raw logger duplicate storms — finalizer emits one event.
+        clickstreamRef.current(type, payload, meta);
+        return;
+      }
       loggerEventRef.current(type, payload, meta);
+      clickstreamRef.current(type, payload, meta);
     },
-    []
+    [log, pipeline.adaptivePlaybackRate]
   );
 
   const adaptiveRate = pipeline.adaptivePlaybackRate;
@@ -205,13 +293,26 @@ function WatchInner() {
           </Badge>
         )}
         <Badge>{isYouTube ? "YouTube" : "HTML5"}</Badge>
+        <Badge variant={experimentCondition === "CONTROL" ? "outline" : "secondary"}>
+          {experimentCondition}
+        </Badge>
         <Badge variant={pipeline.connectionStatus === "connected" ? "default" : "secondary"}>
           WS {pipeline.connectionStatus}
         </Badge>
+        {intervention.state !== "IDLE" && (
+          <Badge variant="outline">ix: {intervention.state}</Badge>
+        )}
         {adaptiveRate !== 1 && (
           <Badge variant="secondary">{adaptiveRate}x adaptive</Badge>
         )}
       </div>
+
+      <InterventionBanner
+        showNotify={intervention.showNotify}
+        showRemedial={intervention.showRemedial}
+        onComplete={intervention.completeRemedial}
+        onDismiss={intervention.dismissRemedial}
+      />
 
       <div className="grid gap-4 lg:grid-cols-3">
         <div className="space-y-4 lg:col-span-2">
