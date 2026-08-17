@@ -1,7 +1,8 @@
 "use client";
 
 /**
- * YouTube IFrame Player — adaptive rate applied without SPEED_CHANGE feedback loop.
+ * YouTube IFrame Player — adaptive rate without SPEED_CHANGE feedback loop.
+ * Exposes VideoController via onControllerReady (Sprint 20.2).
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -12,6 +13,10 @@ import type {
   VideoPlayerEventPayload,
   VideoPlayerEventType,
 } from "../types/video-player";
+import {
+  YouTubeVideoController,
+  type VideoController,
+} from "../player";
 
 declare global {
   interface Window {
@@ -22,6 +27,8 @@ declare global {
 
 export interface YouTubePlayerProps {
   youtubeVideoId: string;
+  /** Internal learning video UUID — required for session-safe resume */
+  videoId?: string;
   className?: string;
   title?: string;
   attentionScore?: number;
@@ -33,6 +40,7 @@ export interface YouTubePlayerProps {
   ) => void;
   onVideoEnd?: () => void;
   pollIntervalMs?: number;
+  onControllerReady?: (controller: VideoController | null) => void;
 }
 
 function loadYouTubeAPI(): Promise<void> {
@@ -57,12 +65,14 @@ function loadYouTubeAPI(): Promise<void> {
 
 export function YouTubePlayer({
   youtubeVideoId,
+  videoId = "",
   className,
   title,
   externalPlaybackRate,
   onEvent,
   onVideoEnd,
   pollIntervalMs = 1000,
+  onControllerReady,
 }: YouTubePlayerProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const playerRef = useRef<any>(null);
@@ -71,6 +81,9 @@ export function YouTubePlayer({
   const playingRef = useRef(false);
   const appliedExternalRateRef = useRef<number | null>(null);
   const lastKnownRateRef = useRef(1);
+  const controllerRef = useRef<YouTubeVideoController | null>(null);
+  const onControllerReadyRef = useRef(onControllerReady);
+  onControllerReadyRef.current = onControllerReady;
   const [ready, setReady] = useState(false);
 
   const emit = useCallback(
@@ -89,6 +102,7 @@ export function YouTubePlayer({
         volume: 1,
         muted: false,
         videoSrc: `youtube:${youtubeVideoId}`,
+        timestamp: Date.now(),
       };
       onEvent(type, payload, meta);
     },
@@ -110,7 +124,14 @@ export function YouTubePlayer({
           playsinline: 1,
         },
         events: {
-          onReady: () => setReady(true),
+          onReady: () => {
+            setReady(true);
+            if (videoId) {
+              const c = new YouTubeVideoController(videoId, playerRef.current);
+              controllerRef.current = c;
+              onControllerReadyRef.current?.(c);
+            }
+          },
           onStateChange: (e: { data: number }) => {
             if (e.data === 1) {
               playingRef.current = true;
@@ -169,6 +190,8 @@ export function YouTubePlayer({
     return () => {
       destroyed = true;
       if (pollRef.current) clearInterval(pollRef.current);
+      onControllerReadyRef.current?.(null);
+      controllerRef.current = null;
       try {
         playerRef.current?.destroy?.();
       } catch {
@@ -177,7 +200,7 @@ export function YouTubePlayer({
       playerRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [youtubeVideoId, pollIntervalMs]);
+  }, [youtubeVideoId, pollIntervalMs, videoId]);
 
   useEffect(() => {
     if (DISABLE_ADAPTIVE_PLAYBACK) return;

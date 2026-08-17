@@ -6,6 +6,7 @@ import { cn } from "@/lib/utils";
 import { useVideoPlayer } from "../hooks/use-video-player";
 import { VideoControls } from "./video-controls";
 import type { VideoPlayerProps, VideoPlayerSource } from "../types/video-player";
+import { Html5VideoController, type VideoController } from "../player";
 
 const DEFAULT_RATES = [0.5, 0.75, 0.8, 1, 1.25, 1.5, 1.75, 2];
 
@@ -14,9 +15,15 @@ function resolveSources(src: string | VideoPlayerSource[]): VideoPlayerSource[] 
   return src;
 }
 
+export interface VideoPlayerExtendedProps extends VideoPlayerProps {
+  /** Internal learning video UUID for VideoController session safety */
+  videoId?: string;
+  onControllerReady?: (controller: VideoController | null) => void;
+}
+
 /**
  * Modern HTML5 learning video player.
- * Supports externalPlaybackRate from the adaptive WebSocket engine.
+ * Supports externalPlaybackRate + VideoController export (Sprint 20.2).
  */
 export function VideoPlayer({
   src,
@@ -33,6 +40,8 @@ export function VideoPlayer({
   playbackRates = DEFAULT_RATES,
   attentionScore = null,
   className,
+  videoId = "",
+  onControllerReady,
   onEvent,
   onPlay,
   onPause,
@@ -44,7 +53,7 @@ export function VideoPlayer({
   onFullscreenChange,
   onTimeUpdate,
   onSubtitleChange,
-}: VideoPlayerProps) {
+}: VideoPlayerExtendedProps) {
   const sources = useMemo(() => resolveSources(src), [src]);
   const primarySrc = sources[0]?.src ?? "";
 
@@ -69,6 +78,20 @@ export function VideoPlayer({
 
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastExternalRate = useRef<number | null>(null);
+  const onControllerReadyRef = useRef(onControllerReady);
+  onControllerReadyRef.current = onControllerReady;
+
+  // Publish Html5VideoController when element is available
+  useEffect(() => {
+    const el = player.videoRef.current;
+    if (!el || !videoId) {
+      onControllerReadyRef.current?.(null);
+      return;
+    }
+    const controller = new Html5VideoController(videoId, el);
+    onControllerReadyRef.current?.(controller);
+    return () => onControllerReadyRef.current?.(null);
+  }, [player.videoRef, videoId, primarySrc]);
 
   const resetHideTimer = () => {
     player.setShowControls(true);
@@ -89,7 +112,6 @@ export function VideoPlayer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoPlay]);
 
-  // Apply adaptive engine rate without fighting manual user changes every frame
   useEffect(() => {
     if (externalPlaybackRate == null) return;
     if (lastExternalRate.current === externalPlaybackRate) return;
